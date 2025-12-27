@@ -1,0 +1,447 @@
+use aws_sdk_s3::{Client, config::Region};
+use aws_sdk_s3::presigning::PresigningConfig;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::primitives::ByteStream;
+use std::error::Error;
+use std::path::Path;
+use std::time::Duration;
+use std::pin::Pin;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::Stream;
+use tokio_util::io::ReaderStream;
+
+/// A pinned, boxed stream of bytes for zero-copy streaming downloads
+pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
+
+#[derive(Debug, Clone)]
+pub struct FileMetadata {
+    pub name: String,
+    pub size: u64,
+    pub modified: String, // ISO 8601 string
+    pub is_dir: bool,
+}
+
+/// Callback for tracking upload progress
+pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
+
+#[async_trait]
+pub trait Storage: Send + Sync {
+    /// Upload data to storage (in-memory)
+    async fn upload(&self, key: &str, data: Vec<u8>) -> Result<String, Box<dyn Error + Send + Sync>>;
+    
+    /// Upload from a file path (streaming) - more efficient for large files
+    async fn upload_from_path(&self, key: &str, path: &Path) -> Result<String, Box<dyn Error + Send + Sync>>;
+    
+    async fn download(&self, key: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>>;
+    async fn delete(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn list(&self, prefix: &str) -> Result<Vec<FileMetadata>, Box<dyn Error + Send + Sync>>;
+    async fn create_folder(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn rename(&self, from: &str, to: &str) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn exists(&self, key: &str) -> Result<bool, Box<dyn Error + Send + Sync>>;
+    
+    /// Generate a presigned URL for direct download (S3-compatible storage only)
+    /// Returns Ok(None) if not supported (e.g., local storage)
+    /// Works with any S3-compatible provider (AWS, Wasabi, MinIO, Backblaze B2, etc.)
+    async fn presigned_download_url(
+        &self,
+        key: &str,
+        expires_in_secs: u64,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>>;
+    
+    /// Check if this storage backend supports presigned URLs
+    fn supports_presigned_urls(&self) -> bool;
+    
+    /// Stream download - returns chunks without loading entire file into memory
+    /// Returns a tuple of (stream, file_size_bytes) for setting Content-Length header
+    /// This is the preferred method for large file downloads when presigned URLs aren't available
+    async fn download_stream(&self, key: &str) -> Result<(StorageByteStream, u64), Box<dyn Error + Send + Sync>>;
+}
+
+pub struct S3Storage {
+    client: Client,
+    bucket: String,
+}
+
+impl S3Storage {
+    pub async fn new(bucket: String) -> Self {
+        let region_provider = RegionProviderChain::default_provider().or_else(Region::new("us-east-1"));
+        let config = aws_config::defaults(BehaviorVersion::latest())
+            .region(region_provider)
+            .load()
+            .await;
+        let client = Client::new(&config);
+        Self { client, bucket }
+    }
+}
+
+#[async_trait]
+impl Storage for S3Storage {
+    async fn upload(&self, key: &str, data: Vec<u8>) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let body = ByteStream::from(data);
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await?;
+        Ok(format!("s3://{}/{}", self.bucket, key))
+    }
+    
+    async fn upload_from_path(&self, key: &str, path: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+        // Stream from file to S3
+        let body = ByteStream::from_path(path).await?;
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await?;
+        Ok(format!("s3://{}/{}", self.bucket, key))
+    }
+
+    async fn download(&self, key: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+        let resp = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        let data = resp.body.collect().await?;
+        Ok(data.into_bytes().to_vec())
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<FileMetadata>, Box<dyn Error + Send + Sync>> {
+        let prefix = if prefix.is_empty() {
+            "".to_string()
+        } else if prefix.ends_with('/') {
+            prefix.to_string()
+        } else {
+            format!("{}/", prefix)
+        };
+
+        let mut response = self.client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(&prefix)
+            .delimiter("/")
+            .send()
+            .await?;
+        
+        let mut files = Vec::new();
+        
+        // Process directories (CommonPrefixes)
+        if let Some(prefixes) = response.common_prefixes {
+            for prefix in prefixes {
+                if let Some(p) = prefix.prefix {
+                    files.push(FileMetadata {
+                        name: p,
+                        size: 0,
+                        modified: String::new(),
+                        is_dir: true,
+                    });
+                }
+            }
+        }
+
+        // Process files (Contents)
+        if let Some(objects) = response.contents {
+            for obj in objects {
+                if let Some(key) = obj.key {
+                    // Skip the prefix itself if it appears in contents (e.g. the folder placeholder)
+                    if key == prefix {
+                        continue;
+                    }
+                    
+                    let size = obj.size.unwrap_or(0) as u64;
+                    let modified = obj.last_modified.map(|d| d.to_string()).unwrap_or_default();
+                    
+                    files.push(FileMetadata {
+                        name: key,
+                        size,
+                        modified,
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+        
+        while response.is_truncated.unwrap_or(false) {
+            let next_token = response.next_continuation_token.clone();
+            response = self.client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix)
+                .delimiter("/")
+                .continuation_token(next_token.unwrap())
+                .send()
+                .await?;
+                
+            if let Some(prefixes) = response.common_prefixes {
+                for prefix in prefixes {
+                    if let Some(p) = prefix.prefix {
+                        files.push(FileMetadata {
+                            name: p,
+                            size: 0,
+                            modified: String::new(),
+                            is_dir: true,
+                        });
+                    }
+                }
+            }
+
+            if let Some(objects) = response.contents {
+                for obj in objects {
+                    if let Some(key) = obj.key {
+                        if key == prefix {
+                            continue;
+                        }
+                        let size = obj.size.unwrap_or(0) as u64;
+                        let modified = obj.last_modified.map(|d| d.to_string()).unwrap_or_default();
+                        
+                        files.push(FileMetadata {
+                            name: key,
+                            size,
+                            modified,
+                            is_dir: false,
+                        });
+                    }
+                }
+            }
+        }
+        
+        Ok(files)
+    }
+
+    async fn create_folder(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let key = if key.ends_with('/') { key.to_string() } else { format!("{}/", key) };
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .body(ByteStream::from(vec![]))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Copy object
+        self.client
+            .copy_object()
+            .bucket(&self.bucket)
+            .copy_source(format!("{}/{}", self.bucket, from))
+            .key(to)
+            .send()
+            .await?;
+
+        // Delete original
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(from)
+            .send()
+            .await?;
+            
+        Ok(())
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        match self.client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await 
+        {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+    
+    /// Generate a presigned URL for direct download from S3-compatible storage
+    /// Works with AWS S3, Wasabi, MinIO, Backblaze B2, etc. - uses configured endpoint
+    async fn presigned_download_url(
+        &self,
+        key: &str,
+        expires_in_secs: u64,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+        let presigning_config = PresigningConfig::expires_in(Duration::from_secs(expires_in_secs))
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        
+        let presigned_request = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        
+        Ok(Some(presigned_request.uri().to_string()))
+    }
+    
+    fn supports_presigned_urls(&self) -> bool {
+        true
+    }
+    
+    async fn download_stream(&self, key: &str) -> Result<(StorageByteStream, u64), Box<dyn Error + Send + Sync>> {
+        let resp = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await?;
+        
+        // Get content length for Content-Length header
+        let size = resp.content_length().unwrap_or(0) as u64;
+        
+        // Convert S3 ByteStream to async reader, then to a Stream of Bytes
+        let async_reader = resp.body.into_async_read();
+        let reader_stream = ReaderStream::new(async_reader);
+        
+        Ok((Box::pin(reader_stream), size))
+    }
+}
+
+pub struct LocalStorage {
+    base_path: std::path::PathBuf,
+}
+
+impl LocalStorage {
+    pub fn new(base_path: &str) -> Self {
+        std::fs::create_dir_all(base_path).unwrap_or_default();
+        Self {
+            base_path: std::path::PathBuf::from(base_path),
+        }
+    }
+}
+
+#[async_trait]
+impl Storage for LocalStorage {
+    async fn upload(&self, key: &str, data: Vec<u8>) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&path, data).await?;
+        Ok(format!("local://{}", path.display()))
+    }
+    
+    async fn upload_from_path(&self, key: &str, source_path: &Path) -> Result<String, Box<dyn Error + Send + Sync>> {
+        let dest_path = self.base_path.join(key);
+        if let Some(parent) = dest_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        // Copy file from source to destination (streaming)
+        tokio::fs::copy(source_path, &dest_path).await?;
+        Ok(format!("local://{}", dest_path.display()))
+    }
+
+    async fn download(&self, key: &str) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        let data = tokio::fs::read(path).await?;
+        Ok(data)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        if path.is_dir() {
+            tokio::fs::remove_dir_all(path).await?;
+        } else {
+            tokio::fs::remove_file(path).await?;
+        }
+        Ok(())
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<FileMetadata>, Box<dyn Error + Send + Sync>> {
+        let mut files = Vec::new();
+        let path = self.base_path.join(prefix);
+        
+        if !path.exists() {
+            return Ok(files);
+        }
+
+        let mut entries = tokio::fs::read_dir(path).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let metadata = entry.metadata().await?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = metadata.is_dir();
+            let size = metadata.len();
+            let modified = metadata.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs().to_string()) // Simple timestamp for now
+                .unwrap_or_default();
+
+            files.push(FileMetadata {
+                name,
+                size,
+                modified,
+                is_dir,
+            });
+        }
+        Ok(files)
+    }
+
+    async fn create_folder(&self, key: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        tokio::fs::create_dir_all(path).await?;
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let from_path = self.base_path.join(from);
+        let to_path = self.base_path.join(to);
+        
+        // Ensure the parent directory of the target exists
+        if let Some(parent) = to_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        tokio::fs::rename(from_path, to_path).await?;
+        Ok(())
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        Ok(path.exists())
+    }
+    
+    /// Local storage doesn't support presigned URLs - returns None to trigger proxy fallback
+    async fn presigned_download_url(
+        &self,
+        _key: &str,
+        _expires_in_secs: u64,
+    ) -> Result<Option<String>, Box<dyn Error + Send + Sync>> {
+        Ok(None) // Not supported, download handler will fallback to proxy
+    }
+    
+    fn supports_presigned_urls(&self) -> bool {
+        false
+    }
+    
+    async fn download_stream(&self, key: &str) -> Result<(StorageByteStream, u64), Box<dyn Error + Send + Sync>> {
+        let path = self.base_path.join(key);
+        let file = tokio::fs::File::open(&path).await?;
+        let metadata = file.metadata().await?;
+        let size = metadata.len();
+        
+        // Create a ReaderStream from the tokio file (streams in ~8KB chunks by default)
+        let stream = ReaderStream::new(file);
+        
+        Ok((Box::pin(stream), size))
+    }
+}

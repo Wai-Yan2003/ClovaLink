@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Trash2, RefreshCw, ArrowLeft, AlertCircle, User, Filter, Loader2, RotateCcw, Trash } from 'lucide-react';
+import { Trash2, RefreshCw, ArrowLeft, AlertCircle, Filter, Loader2, RotateCcw, Trash, Building2, User } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 
@@ -19,18 +19,17 @@ interface TrashItem {
     owner_id?: string;
 }
 
-interface UserOption {
+interface DepartmentOption {
     id: string;
     name: string;
-    email: string;
 }
 
 export default function RecycleBin() {
     const [items, setItems] = useState<TrashItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [selectedOwner, setSelectedOwner] = useState<string>('all');
-    const [users, setUsers] = useState<UserOption[]>([]);
+    const [selectedDepartment, setSelectedDepartment] = useState<string>('all');
+    const [departments, setDepartments] = useState<DepartmentOption[]>([]);
     const [isRestoring, setIsRestoring] = useState<string | null>(null);
     const [isDeleting, setIsDeleting] = useState<string | null>(null);
     
@@ -42,26 +41,25 @@ export default function RecycleBin() {
     const companyId = currentCompany?.id;
     const isAdmin = user?.role === 'SuperAdmin' || user?.role === 'Admin';
 
-    // Fetch users for filter dropdown (admins only)
+    // Fetch departments for filter dropdown (admins only)
     useEffect(() => {
         if (!companyId || !isAdmin) return;
         
-        const fetchUsers = async () => {
+        const fetchDepartments = async () => {
             try {
-                const response = await authFetch(`/api/users/${companyId}`);
+                const response = await authFetch('/api/departments');
                 if (response.ok) {
                     const data = await response.json();
-                    setUsers(data.map((u: any) => ({
-                        id: u.id,
-                        name: u.name,
-                        email: u.email,
+                    setDepartments(data.map((d: any) => ({
+                        id: d.id,
+                        name: d.name,
                     })));
                 }
             } catch (err) {
-                console.error('Failed to fetch users for filter', err);
+                console.error('Failed to fetch departments for filter', err);
             }
         };
-        fetchUsers();
+        fetchDepartments();
     }, [companyId, isAdmin, authFetch]);
 
     const fetchTrash = useCallback(async () => {
@@ -71,10 +69,10 @@ export default function RecycleBin() {
         setError(null);
         
         try {
-            // Build URL with owner filter for admins
+            // Build URL with department filter for admins
             let url = `/api/trash/${companyId}`;
-            if (isAdmin && selectedOwner !== 'all') {
-                url += `?owner_id=${selectedOwner}`;
+            if (isAdmin && selectedDepartment !== 'all') {
+                url += `?department_id=${selectedDepartment}`;
             }
             
             const response = await authFetch(url);
@@ -97,7 +95,7 @@ export default function RecycleBin() {
         } finally {
             setIsLoading(false);
         }
-    }, [companyId, authFetch, isAdmin, selectedOwner]);
+    }, [companyId, authFetch, isAdmin, selectedDepartment]);
 
     useEffect(() => {
         if (companyId) {
@@ -172,8 +170,8 @@ export default function RecycleBin() {
     return (
         <div className="h-full flex flex-col space-y-4">
             {/* Header */}
-            <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center space-x-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+                <div className="flex items-center space-x-3 md:space-x-4">
                     <Link 
                         to="/files" 
                         className="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
@@ -181,29 +179,29 @@ export default function RecycleBin() {
                         <ArrowLeft className="w-5 h-5" />
                     </Link>
                     <div>
-                        <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center">
-                            <Trash2 className="w-6 h-6 mr-3 text-red-500 dark:text-red-400" />
+                        <h1 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white flex items-center">
+                            <Trash2 className="w-5 h-5 md:w-6 md:h-6 mr-2 md:mr-3 text-red-500 dark:text-red-400" />
                             Recycle Bin
                         </h1>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                            Items in the recycle bin will be permanently deleted after {currentCompany?.retention_policy_days || 30} days.
+                        <p className="text-xs md:text-sm text-gray-500 dark:text-gray-400 mt-1 hidden sm:block">
+                            Items will be permanently deleted after {currentCompany?.retention_policy_days || 30} days.
                         </p>
                     </div>
                 </div>
                 
-                <div className="flex items-center space-x-3">
-                    {/* User filter for admins */}
-                    {isAdmin && users.length > 0 && (
-                        <div className="flex items-center space-x-2">
-                            <Filter className="w-4 h-4 text-gray-400" />
+                <div className="flex items-center justify-between sm:justify-end gap-2 sm:gap-3">
+                    {/* Department filter for admins */}
+                    {isAdmin && departments.length > 0 && (
+                        <div className="flex items-center gap-1.5 sm:gap-2 flex-1 sm:flex-none">
+                            <Building2 className="w-4 h-4 text-gray-400 hidden sm:block" />
                             <select
-                                value={selectedOwner}
-                                onChange={(e) => setSelectedOwner(e.target.value)}
-                                className="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                                value={selectedDepartment}
+                                onChange={(e) => setSelectedDepartment(e.target.value)}
+                                className="text-sm border border-gray-300 dark:border-gray-600 rounded-lg px-2 sm:px-3 py-2 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 w-full sm:w-auto"
                             >
-                                <option value="all">All Users</option>
-                                {users.map(u => (
-                                    <option key={u.id} value={u.id}>{u.name}</option>
+                                <option value="all">All Departments</option>
+                                {departments.map(d => (
+                                    <option key={d.id} value={d.id}>{d.name}</option>
                                 ))}
                             </select>
                         </div>
@@ -212,7 +210,7 @@ export default function RecycleBin() {
                     <button
                         onClick={fetchTrash}
                         disabled={isLoading}
-                        className="p-3 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-all disabled:opacity-50"
+                        className="p-2 sm:p-3 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-all disabled:opacity-50"
                         title="Refresh"
                     >
                         <RefreshCw className={clsx("w-5 h-5", isLoading && "animate-spin")} />
@@ -246,22 +244,22 @@ export default function RecycleBin() {
                 <div className="text-center py-20 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm">
                     <Trash2 className="w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4" />
                     <p className="text-gray-500 dark:text-gray-400 text-lg">
-                        {selectedOwner !== 'all' ? 'No deleted files for this user' : 'Recycle bin is empty'}
+                        {selectedDepartment !== 'all' ? 'No deleted files for this department' : 'Recycle bin is empty'}
                     </p>
-                    {selectedOwner !== 'all' && (
+                    {selectedDepartment !== 'all' && (
                         <button
-                            onClick={() => setSelectedOwner('all')}
+                            onClick={() => setSelectedDepartment('all')}
                             className="mt-4 text-primary-600 hover:text-primary-700 dark:text-primary-400 text-sm font-medium"
                         >
-                            Show all users' files
+                            Show all departments
                         </button>
                     )}
                 </div>
             ) : (
                 <div className="bg-white dark:bg-gray-800 shadow-sm overflow-hidden rounded-2xl border border-gray-200 dark:border-gray-700">
-                    {/* Table Header for Admins */}
+                    {/* Table Header for Admins - Hidden on mobile */}
                     {isAdmin && (
-                        <div className="px-6 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700 grid grid-cols-12 gap-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                        <div className="hidden md:grid px-6 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700 grid-cols-12 gap-4 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             <div className="col-span-5">File</div>
                             <div className="col-span-2">Owner</div>
                             <div className="col-span-2">Deleted</div>
@@ -274,23 +272,23 @@ export default function RecycleBin() {
                             <div 
                                 key={item.id} 
                                 className={clsx(
-                                    "px-6 py-5 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors group",
-                                    isAdmin ? "grid grid-cols-12 gap-4 items-center" : "flex items-center justify-between"
+                                    "px-4 md:px-6 py-4 md:py-5 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors group",
+                                    isAdmin ? "flex flex-col md:grid md:grid-cols-12 gap-3 md:gap-4 md:items-center" : "flex flex-col md:flex-row md:items-center md:justify-between gap-3"
                                 )}
                             >
                                 {/* File Info */}
-                                <div className={clsx("flex items-center min-w-0", isAdmin ? "col-span-5" : "flex-1")}>
-                                    <div className="flex-shrink-0 h-12 w-12 rounded-xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center group-hover:bg-red-200 dark:group-hover:bg-red-500/30 transition-colors">
-                                        <Trash2 className="h-6 w-6 text-red-600 dark:text-red-400" />
+                                <div className={clsx("flex items-center min-w-0 w-full", isAdmin ? "md:col-span-5" : "md:flex-1")}>
+                                    <div className="flex-shrink-0 h-10 w-10 md:h-12 md:w-12 rounded-xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center group-hover:bg-red-200 dark:group-hover:bg-red-500/30 transition-colors">
+                                        <Trash2 className="h-5 w-5 md:h-6 md:w-6 text-red-600 dark:text-red-400" />
                                     </div>
-                                    <div className="ml-4 min-w-0">
+                                    <div className="ml-3 md:ml-4 min-w-0 flex-1">
                                         <div className="text-sm font-medium text-gray-900 dark:text-white truncate" title={item.name}>
                                             {item.name}
                                         </div>
-                                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 md:mt-1 truncate">
                                             {item.size || formatFileSize(item.size_bytes)}
                                             {item.original_path && (
-                                                <span className="ml-2 text-gray-400 dark:text-gray-500">
+                                                <span className="ml-2 text-gray-400 dark:text-gray-500 hidden sm:inline">
                                                     from {item.original_path}
                                                 </span>
                                             )}
@@ -298,31 +296,31 @@ export default function RecycleBin() {
                                     </div>
                                 </div>
                                 
-                                {/* Owner (Admin only) */}
-                                {isAdmin && (
-                                    <div className="col-span-2 flex items-center text-sm text-gray-600 dark:text-gray-400">
-                                        <User className="w-4 h-4 mr-2 text-gray-400" />
-                                        <span className="truncate">{item.owner_name || 'Unknown'}</span>
-                                    </div>
-                                )}
-                                
-                                {/* Deleted Date */}
+                                {/* Owner & Date Row - Stacked on mobile, grid columns on desktop */}
                                 {isAdmin ? (
-                                    <div className="col-span-2 text-sm text-gray-500 dark:text-gray-400">
-                                        {safeFormatDate(item.deleted_at || item.modified)}
+                                    <div className="flex items-center justify-between md:contents text-sm text-gray-500 dark:text-gray-400 pl-13 md:pl-0">
+                                        {/* Owner */}
+                                        <div className="flex items-center md:col-span-2">
+                                            <User className="w-4 h-4 mr-1.5 md:mr-2 text-gray-400" />
+                                            <span className="truncate">{item.owner_name || 'Unknown'}</span>
+                                        </div>
+                                        {/* Deleted Date */}
+                                        <div className="md:col-span-2 text-xs md:text-sm">
+                                            {safeFormatDate(item.deleted_at || item.modified)}
+                                        </div>
                                     </div>
                                 ) : (
-                                    <div className="text-xs text-gray-500 dark:text-gray-400 mx-4">
+                                    <div className="text-xs text-gray-500 dark:text-gray-400 pl-13 md:pl-0 md:mx-4">
                                         Deleted {safeFormatDate(item.deleted_at || item.modified)}
                                     </div>
                                 )}
                                 
-                                {/* Actions */}
-                                <div className={clsx("flex space-x-2", isAdmin ? "col-span-3 justify-end" : "")}>
+                                {/* Actions - Full width on mobile */}
+                                <div className={clsx("flex gap-2 w-full md:w-auto", isAdmin ? "md:col-span-3 md:justify-end" : "md:justify-end")}>
                                     <button
                                         onClick={() => handleRestore(item)}
                                         disabled={isRestoring === item.id}
-                                        className="px-4 py-2 text-sm font-medium rounded-lg text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-500/20 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 border border-emerald-200 dark:border-emerald-500/30 transition-all disabled:opacity-50 flex items-center gap-1"
+                                        className="flex-1 md:flex-none px-3 md:px-4 py-2 text-sm font-medium rounded-lg text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-500/20 hover:bg-emerald-200 dark:hover:bg-emerald-500/30 border border-emerald-200 dark:border-emerald-500/30 transition-all disabled:opacity-50 flex items-center justify-center gap-1"
                                     >
                                         {isRestoring === item.id ? (
                                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -334,7 +332,7 @@ export default function RecycleBin() {
                                     <button
                                         onClick={() => handleDelete(item)}
                                         disabled={isDeleting === item.id}
-                                        className="px-4 py-2 text-sm font-medium rounded-lg text-red-700 dark:text-red-400 bg-red-100 dark:bg-red-500/20 hover:bg-red-200 dark:hover:bg-red-500/30 border border-red-200 dark:border-red-500/30 transition-all disabled:opacity-50 flex items-center gap-1"
+                                        className="flex-1 md:flex-none px-3 md:px-4 py-2 text-sm font-medium rounded-lg text-red-700 dark:text-red-400 bg-red-100 dark:bg-red-500/20 hover:bg-red-200 dark:hover:bg-red-500/30 border border-red-200 dark:border-red-500/30 transition-all disabled:opacity-50 flex items-center justify-center gap-1"
                                     >
                                         {isDeleting === item.id ? (
                                             <Loader2 className="w-4 h-4 animate-spin" />

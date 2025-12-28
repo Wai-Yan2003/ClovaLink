@@ -18,6 +18,7 @@ use crate::extensions::dispatch_file_upload;
 use crate::compliance::{ComplianceRestrictions, get_tenant_compliance_mode, should_force_audit_log, log_file_export};
 use clovalink_auth::AuthUser;
 use clovalink_core::models::FileMetadata;
+use sqlx::Row;
 use clovalink_core::security_service;
 
 /// Format bytes into human-readable string
@@ -2193,7 +2194,7 @@ pub async fn delete_file(
 
 #[derive(serde::Deserialize)]
 pub struct ListTrashParams {
-    owner_id: Option<String>,  // For admin viewing specific user's trash
+    department_id: Option<String>,  // For admin viewing specific department's trash
 }
 
 pub async fn list_trash(
@@ -2204,42 +2205,52 @@ pub async fn list_trash(
 ) -> Result<Json<Value>, StatusCode> {
     let tenant_id = Uuid::parse_str(&company_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     
-    // Determine which user's trash to show
-    let target_owner = if let Some(ref oid) = params.owner_id {
-        // Only admins can view another user's trash
-        if (auth.role == "SuperAdmin" || auth.role == "Admin") && !oid.is_empty() {
-            match Uuid::parse_str(oid) {
-                Ok(target_uuid) => Some(target_uuid),
-                Err(_) => None  // Invalid UUID, show all (for admins)
-            }
+    // Determine department filter for admins
+    let target_department = if let Some(ref did) = params.department_id {
+        // Only admins can filter by department
+        if (auth.role == "SuperAdmin" || auth.role == "Admin") && !did.is_empty() {
+            Uuid::parse_str(did).ok()
         } else {
-            Some(auth.user_id)  // Non-admin can only see their own
+            None
         }
     } else {
-        None  // No filter - admins see all, others see their own
+        None
     };
     
-    // Build query based on role and owner filter
-    let files = if let Some(owner) = target_owner {
-        sqlx::query_as::<_, FileMetadata>(
-            "SELECT * FROM files_metadata WHERE tenant_id = $1 AND is_deleted = true AND owner_id = $2 ORDER BY deleted_at DESC"
+    // Build query based on role and department filter - JOIN with users to get owner_name
+    let rows = if let Some(dept_id) = target_department {
+        // Admin filtering by department
+        sqlx::query(
+            r#"SELECT fm.id, fm.name, fm.parent_path, fm.size_bytes, fm.is_directory, fm.deleted_at, fm.owner_id, fm.visibility, u.name as owner_name
+               FROM files_metadata fm
+               LEFT JOIN users u ON fm.owner_id = u.id
+               WHERE fm.tenant_id = $1 AND fm.is_deleted = true AND u.department_id = $2
+               ORDER BY fm.deleted_at DESC"#
         )
         .bind(tenant_id)
-        .bind(owner)
+        .bind(dept_id)
         .fetch_all(&state.pool)
         .await
     } else if auth.role == "SuperAdmin" || auth.role == "Admin" {
         // Admins with no filter see all tenant's deleted files
-        sqlx::query_as::<_, FileMetadata>(
-            "SELECT * FROM files_metadata WHERE tenant_id = $1 AND is_deleted = true ORDER BY deleted_at DESC"
+        sqlx::query(
+            r#"SELECT fm.id, fm.name, fm.parent_path, fm.size_bytes, fm.is_directory, fm.deleted_at, fm.owner_id, fm.visibility, u.name as owner_name
+               FROM files_metadata fm
+               LEFT JOIN users u ON fm.owner_id = u.id
+               WHERE fm.tenant_id = $1 AND fm.is_deleted = true
+               ORDER BY fm.deleted_at DESC"#
         )
         .bind(tenant_id)
         .fetch_all(&state.pool)
         .await
     } else {
         // Regular users only see their own deleted files
-        sqlx::query_as::<_, FileMetadata>(
-            "SELECT * FROM files_metadata WHERE tenant_id = $1 AND is_deleted = true AND owner_id = $2 ORDER BY deleted_at DESC"
+        sqlx::query(
+            r#"SELECT fm.id, fm.name, fm.parent_path, fm.size_bytes, fm.is_directory, fm.deleted_at, fm.owner_id, fm.visibility, u.name as owner_name
+               FROM files_metadata fm
+               LEFT JOIN users u ON fm.owner_id = u.id
+               WHERE fm.tenant_id = $1 AND fm.is_deleted = true AND fm.owner_id = $2
+               ORDER BY fm.deleted_at DESC"#
         )
         .bind(tenant_id)
         .bind(auth.user_id)
@@ -2250,26 +2261,37 @@ pub async fn list_trash(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     
-    let file_items: Vec<Value> = files.into_iter().map(|meta| {
+    let file_items: Vec<Value> = rows.into_iter().map(|row| {
+        let id: Uuid = row.get("id");
+        let name: String = row.get("name");
+        let parent_path: Option<String> = row.get("parent_path");
+        let size_bytes: i64 = row.get("size_bytes");
+        let is_directory: bool = row.get("is_directory");
+        let deleted_at: Option<chrono::DateTime<chrono::Utc>> = row.get("deleted_at");
+        let owner_id: Option<Uuid> = row.get("owner_id");
+        let visibility: Option<String> = row.get("visibility");
+        let owner_name: Option<String> = row.get("owner_name");
+        
         // Build display path from name and parent_path (content-addressed storage)
-        let display_path = if let Some(ref pp) = meta.parent_path {
-            if pp.is_empty() { meta.name.clone() } else { format!("{}/{}", pp, meta.name) }
+        let display_path = if let Some(ref pp) = parent_path {
+            if pp.is_empty() { name.clone() } else { format!("{}/{}", pp, name) }
         } else {
-            meta.name.clone()
+            name.clone()
         };
         
         json!({
-            "id": meta.id.to_string(),
-            "file_id": meta.id.to_string(),
-            "name": meta.name,
+            "id": id.to_string(),
+            "file_id": id.to_string(),
+            "name": name,
             "path": display_path,
-            "parent_path": meta.parent_path,
-            "size": format_size(meta.size_bytes as u64),
-            "size_bytes": meta.size_bytes,
-            "is_directory": meta.is_directory,
-            "deleted_at": meta.deleted_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
-            "owner_id": meta.owner_id,
-            "visibility": meta.visibility
+            "parent_path": parent_path,
+            "size": format_size(size_bytes as u64),
+            "size_bytes": size_bytes,
+            "is_directory": is_directory,
+            "deleted_at": deleted_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            "owner_id": owner_id,
+            "owner_name": owner_name,
+            "visibility": visibility
         })
     }).collect();
 

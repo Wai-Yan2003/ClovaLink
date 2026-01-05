@@ -5,7 +5,7 @@ import {
     Trash2, Eye, EyeOff, Upload, Grid, List, Search, Plus, Star, Clock,
     FolderPlus, Edit2, Edit3, Link as LinkIcon, ChevronLeft, ChevronRight, ChevronDown,
     Lock, Unlock, History, FileOutput, Move, Home, Users, CheckSquare, Square, X,
-    Building2, MoreHorizontal, Clipboard, Layers
+    Building2, MoreHorizontal, Clipboard, Layers, ArrowUpDown
 } from 'lucide-react';
 import clsx from 'clsx';
 import { CreateFileRequestModal, FileRequestData } from '../components/CreateFileRequestModal';
@@ -76,6 +76,9 @@ interface FileGroup {
     total_size: number; // Total size in bytes
     owner_name?: string;
     parent_path?: string; // Folder path where this group lives (null/empty = root)
+    // Visibility (matches file model)
+    visibility: string; // 'department' or 'private'
+    owner_id?: string;
     // Locking fields
     is_locked?: boolean;
     locked_by?: string;
@@ -111,6 +114,10 @@ export function FileBrowser() {
     // Mobile overflow menu
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     const mobileMenuRef = useRef<HTMLDivElement>(null);
+    
+    // Sort menu dropdown
+    const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+    const sortMenuRef = useRef<HTMLDivElement>(null);
     
     // Department filtering for admins
     const [departments, setDepartments] = useState<{id: string, name: string}[]>([]);
@@ -216,15 +223,35 @@ export function FileBrowser() {
         return () => window.removeEventListener('resize', handleResize);
     }, []);
 
-    // Fetch departments for filtering (admins only)
+    // Fetch departments for filtering
+    // For admins: show all departments
+    // For non-admins: filter to their assigned department(s)
     useEffect(() => {
-        if (companyId && (user?.role === 'Admin' || user?.role === 'SuperAdmin')) {
+        if (companyId) {
             authFetch('/api/departments')
                 .then(res => res.ok ? res.json() : [])
-                .then(data => setDepartments(data))
+                .then(data => {
+                    if (user?.role === 'SuperAdmin' || user?.role === 'Admin') {
+                        // Admins see all departments
+                        setDepartments(data);
+                    } else {
+                        // Non-admins only see their department(s)
+                        const userDepts = [
+                            user?.department_id,
+                            ...(user?.allowed_department_ids || [])
+                        ].filter(Boolean);
+                        const filtered = data.filter((d: { id: string }) => userDepts.includes(d.id));
+                        setDepartments(filtered);
+                        
+                        // Auto-select user's department if they have one
+                        if (user?.department_id && filtered.length > 0) {
+                            setSelectedDepartment(user.department_id);
+                        }
+                    }
+                })
                 .catch(() => setDepartments([]));
         }
-    }, [companyId, user?.role]);
+    }, [companyId, user?.role, user?.department_id, user?.allowed_department_ids]);
     
     // Fetch AI status for the tenant
     useEffect(() => {
@@ -259,6 +286,9 @@ export function FileBrowser() {
             }
             if (mobileMenuRef.current && !mobileMenuRef.current.contains(event.target as Node)) {
                 setIsMobileMenuOpen(false);
+            }
+            if (sortMenuRef.current && !sortMenuRef.current.contains(event.target as Node)) {
+                setIsSortMenuOpen(false);
             }
         };
         document.addEventListener('click', handleClickOutside);
@@ -462,40 +492,38 @@ export function FileBrowser() {
                 });
 
                 // Fetch groups at the current path level
-                if (fileViewMode === 'department') {
-                    // Build query params for groups - filter by current path
-                    const groupParams = new URLSearchParams();
-                    if (selectedDepartment) groupParams.set('department_id', selectedDepartment);
-                    groupParams.set('parent_path', path); // Empty string = root
+                // Groups are filtered by visibility on the backend (private groups only visible to owner/admins)
+                const groupParams = new URLSearchParams();
+                if (selectedDepartment) groupParams.set('department_id', selectedDepartment);
+                groupParams.set('parent_path', path); // Empty string = root
+                groupParams.set('visibility', fileViewMode); // Filter by current view mode
+                
+                const groupsRes = await authFetch(`/api/groups/${companyId}?${groupParams.toString()}`);
+                if (groupsRes.ok) {
+                    const groupsData: FileGroup[] = await groupsRes.json();
+                    setGroups(groupsData);
                     
-                    const groupsRes = await authFetch(`/api/groups/${companyId}?${groupParams.toString()}`);
-                    if (groupsRes.ok) {
-                        const groupsData: FileGroup[] = await groupsRes.json();
-                        setGroups(groupsData);
-                        
-                        // Convert groups to FileItem format and prepend to files
-                        // Groups can also be starred (use same starred array)
-                        const groupItems: FileItem[] = groupsData.map(g => ({
-                            id: g.id,
-                            name: g.name,
-                            type: 'group' as const,
-                            modified: g.updated_at,
-                            created_at: g.created_at,
-                            owner: g.owner_name || 'Unknown',
-                            owner_id: g.created_by,
-                            color: g.color,
-                            file_count: g.file_count,
-                            total_size: g.total_size,
-                            is_starred: starredData.starred.includes(g.id),
-                            // Locking fields
-                            is_locked: g.is_locked,
-                            locked_by: g.locked_by,
-                            lock_requires_role: g.lock_requires_role,
-                        }));
-                        setFiles([...groupItems, ...mergedFiles]);
-                    } else {
-                        setFiles(mergedFiles);
-                    }
+                    // Convert groups to FileItem format and prepend to files
+                    // Groups can also be starred (use same starred array)
+                    const groupItems: FileItem[] = groupsData.map(g => ({
+                        id: g.id,
+                        name: g.name,
+                        type: 'group' as const,
+                        modified: g.updated_at,
+                        created_at: g.created_at,
+                        owner: g.owner_name || 'Unknown',
+                        owner_id: g.created_by,
+                        color: g.color,
+                        file_count: g.file_count,
+                        total_size: g.total_size,
+                        is_starred: starredData.starred.includes(g.id),
+                        visibility: g.visibility as 'department' | 'private',  // Groups are locked to their visibility
+                        // Locking fields
+                        is_locked: g.is_locked,
+                        locked_by: g.locked_by,
+                        lock_requires_role: g.lock_requires_role,
+                    }));
+                    setFiles([...groupItems, ...mergedFiles]);
                 } else {
                     setFiles(mergedFiles);
                 }
@@ -536,6 +564,7 @@ export function FileBrowser() {
                 description: description || null,
                 color,
                 department_id: selectedDepartment || null,
+                visibility: fileViewMode,  // Match current view mode (department or private)
             }),
         });
 
@@ -584,6 +613,7 @@ export function FileBrowser() {
             created_by: '',
             created_at: group.created_at || '',
             updated_at: group.modified || '',
+            visibility: 'department', // Default visibility
         };
         
         setViewingGroup(fullGroup);
@@ -697,18 +727,29 @@ export function FileBrowser() {
     ): Promise<{ success: boolean; error?: string; duplicate?: boolean; conflicting_name?: string; suggested_name?: string }> => {
         if (!groupToMove) return { success: false, error: 'No group selected' };
         
-        console.log('Moving group:', groupToMove.id, 'to folder:', targetParentId);
+        // Use the group's current visibility, not the modal's selection
+        // Groups are locked to their visibility, so we must use their current one
+        const groupVisibility = groupToMove.visibility || 'department';
+        
+        console.log('Moving group:', groupToMove.id, 'to folder:', targetParentId, 'visibility:', groupVisibility);
         
         try {
             const response = await authFetch(`/api/groups/${companyId}/${groupToMove.id}/move`, {
                 method: 'PUT',
                 body: JSON.stringify({ 
                     target_folder_id: targetParentId,
+                    target_visibility: groupVisibility,  // Use group's visibility, not modal's
                 }),
             });
 
             const result = await response.json();
             console.log('Move group response:', response.status, result);
+            
+            // Handle visibility locked error with a user-friendly message
+            if (result.visibility_locked) {
+                alert('Groups cannot be moved between Department Files and Private Files. They are locked to their original visibility.');
+                return { success: false, error: result.error };
+            }
             
             if (!response.ok || result.error) {
                 return { success: false, error: result.error || result.message || 'Failed to move group' };
@@ -1448,6 +1489,24 @@ export function FileBrowser() {
     const canViewActivity = user?.role === 'SuperAdmin' || user?.role === 'Admin';
     const isAdminOrHigher = user?.role === 'SuperAdmin' || user?.role === 'Admin';
     
+    // Track if we're inside a company folder (for restricting actions)
+    const [isInsideCompanyFolder, setIsInsideCompanyFolder] = useState(false);
+    
+    // Helper to navigate into a folder and track company folder status
+    const navigateToFolder = (folder: FileItem) => {
+        // Update path
+        setCurrentPath([...currentPath, folder.name]);
+        
+        // Track company folder status - once inside a company folder, stay in that mode
+        // until navigating back out to root or a non-company folder
+        if (folder.is_company_folder || isInsideCompanyFolder) {
+            setIsInsideCompanyFolder(true);
+        }
+    };
+    
+    // Reset company folder status when navigating back (via breadcrumb)
+    // This will be handled in the breadcrumb click handler
+    
     // File-level permission checks
     const canDeleteFile = (file: FileItem) => {
         if (file.is_locked) return false;
@@ -1615,7 +1674,7 @@ export function FileBrowser() {
                             if (file.type === 'group') {
                                 handleGroupClick(file);
                             } else if (file.type === 'folder') {
-                                setCurrentPath([...currentPath, file.name]);
+                                navigateToFolder(file);
                             } else {
                                 handlePreview(file);
                             }
@@ -2084,33 +2143,43 @@ export function FileBrowser() {
                                 <><EyeOff className="w-4 h-4 mr-2 text-purple-500" />My Private Files</>
                             ) : selectedDepartment ? (
                                 <><Building2 className="w-4 h-4 mr-2 text-green-500" />{departments.find(d => d.id === selectedDepartment)?.name || 'Department'}</>
-                            ) : (
+                            ) : (user?.role === 'SuperAdmin' || user?.role === 'Admin') ? (
                                 <><Users className="w-4 h-4 mr-2 text-blue-500" />All Departments</>
+                            ) : departments.length === 1 ? (
+                                <><Building2 className="w-4 h-4 mr-2 text-green-500" />{departments[0].name}</>
+                            ) : (
+                                <><Building2 className="w-4 h-4 mr-2 text-green-500" />My Department</>
                             )}
                             <ChevronDown className="w-4 h-4 ml-2 text-gray-400" />
                         </button>
                         {isViewModeOpen && (
                             <div className="absolute left-0 mt-2 w-56 bg-white dark:bg-gray-800 rounded-lg shadow-lg py-1 ring-1 ring-black ring-opacity-5 z-50 border border-gray-200 dark:border-gray-700 max-h-80 overflow-y-auto">
-                                {/* All Departments option */}
-                                <button
-                                    onClick={() => { setFileViewMode('department'); setSelectedDepartment(null); setIsViewModeOpen(false); }}
-                                    className={clsx(
-                                        "flex items-center w-full px-4 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700",
-                                        fileViewMode === 'department' && !selectedDepartment && "bg-gray-50 dark:bg-gray-700 font-medium"
-                                    )}
-                                >
-                                    <Users className="w-4 h-4 mr-3 text-blue-500" />
-                                    All Departments
-                                    {fileViewMode === 'department' && !selectedDepartment && <span className="ml-auto text-primary-500">✓</span>}
-                                </button>
+                                {/* All Departments option - only for admins */}
+                                {(user?.role === 'SuperAdmin' || user?.role === 'Admin') && (
+                                    <button
+                                        onClick={() => { setFileViewMode('department'); setSelectedDepartment(null); setIsViewModeOpen(false); }}
+                                        className={clsx(
+                                            "flex items-center w-full px-4 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700",
+                                            fileViewMode === 'department' && !selectedDepartment && "bg-gray-50 dark:bg-gray-700 font-medium"
+                                        )}
+                                    >
+                                        <Users className="w-4 h-4 mr-3 text-blue-500" />
+                                        All Departments
+                                        {fileViewMode === 'department' && !selectedDepartment && <span className="ml-auto text-primary-500">✓</span>}
+                                    </button>
+                                )}
                                 
-                                {/* Individual department options for admins */}
-                                {departments.length > 0 && (user?.role === 'Admin' || user?.role === 'SuperAdmin') && (
+                                {/* Department options - admins see filter section, non-admins see their department(s) as main options */}
+                                {departments.length > 0 && (
                                     <>
-                                        <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
-                                        <div className="px-4 py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                                            Filter by Department
-                                        </div>
+                                        {(user?.role === 'SuperAdmin' || user?.role === 'Admin') && (
+                                            <>
+                                                <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+                                                <div className="px-4 py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                                                    Filter by Department
+                                                </div>
+                                            </>
+                                        )}
                                         {departments.map((dept) => (
                                             <button
                                                 key={dept.id}
@@ -2178,7 +2247,7 @@ export function FileBrowser() {
                         >
                             <LinkIcon className="w-5 h-5" />
                         </button>
-                        {!currentGroup && (
+                        {!currentGroup && (!isInsideCompanyFolder || isAdminOrHigher) && (
                             <button
                                 onClick={() => setIsNewFolderOpen(true)}
                                 title="New Folder"
@@ -2187,7 +2256,7 @@ export function FileBrowser() {
                                 <FolderPlus className="w-5 h-5" />
                             </button>
                         )}
-                        {!currentGroup && fileViewMode === 'department' && (
+                        {!currentGroup && (!isInsideCompanyFolder || isAdminOrHigher) && (
                             <button
                                 onClick={() => setIsCreateGroupOpen(true)}
                                 title="New Group"
@@ -2253,7 +2322,7 @@ export function FileBrowser() {
                                     <LinkIcon className="w-5 h-5 mr-3" />
                                     Request Files
                                 </button>
-                                {!currentGroup && (
+                                {!currentGroup && (!isInsideCompanyFolder || isAdminOrHigher) && (
                                     <button
                                         onClick={() => { setIsNewFolderOpen(true); setIsMobileMenuOpen(false); }}
                                         className="flex items-center w-full px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -2262,7 +2331,7 @@ export function FileBrowser() {
                                         New Folder
                                     </button>
                                 )}
-                                {!currentGroup && fileViewMode === 'department' && (
+                                {!currentGroup && (!isInsideCompanyFolder || isAdminOrHigher) && (
                                     <button
                                         onClick={() => { setIsCreateGroupOpen(true); setIsMobileMenuOpen(false); }}
                                         className="flex items-center w-full px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -2293,13 +2362,16 @@ export function FileBrowser() {
                         multiple
                         onChange={handleFileInput}
                     />
-                    <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center px-3 sm:px-4 py-2 bg-primary-600 rounded-lg text-sm font-medium text-white hover:bg-primary-700 shadow-sm"
-                    >
-                        <Upload className="w-4 h-4 sm:mr-2" />
-                        <span className="hidden sm:inline">Upload File</span>
-                    </button>
+                    {/* Hide upload button for non-admins in company folders */}
+                    {(!isInsideCompanyFolder || isAdminOrHigher) && (
+                        <button
+                            onClick={() => fileInputRef.current?.click()}
+                            className="flex items-center px-3 sm:px-4 py-2 bg-primary-600 rounded-lg text-sm font-medium text-white hover:bg-primary-700 shadow-sm"
+                        >
+                            <Upload className="w-4 h-4 sm:mr-2" />
+                            <span className="hidden sm:inline">Upload File</span>
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -2403,7 +2475,7 @@ export function FileBrowser() {
                                                             if (file.type === 'group') {
                                                                 handleGroupClick(file);
                                                             } else if (file.type === 'folder') {
-                                                                setCurrentPath([...currentPath, file.name]);
+                                                                navigateToFolder(file);
                                                             } else {
                                                                 handlePreview(file);
                                                             }
@@ -2434,7 +2506,7 @@ export function FileBrowser() {
                                         if (file.type === 'group') {
                                             handleGroupClick(file);
                                         } else if (file.type === 'folder') {
-                                            setCurrentPath([...currentPath, file.name]);
+                                            navigateToFolder(file);
                                         } else {
                                             handlePreview(file);
                                         }
@@ -2646,9 +2718,14 @@ export function FileBrowser() {
                                         if (index === 0 && currentGroup) {
                                             // Exiting from a group - go back to root
                                             handleExitGroup();
+                                            setIsInsideCompanyFolder(false);
                                         } else {
                                             const newPath = currentPath.slice(0, index + 1);
                                             setCurrentPath(newPath);
+                                            // Reset company folder status when going back to root
+                                            if (index === 0) {
+                                                setIsInsideCompanyFolder(false);
+                                            }
                                         }
                                     }}
                                     onDragOver={(e) => {
@@ -2683,6 +2760,56 @@ export function FileBrowser() {
                                 className="w-full sm:w-64 pl-9 pr-4 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-1 focus:ring-primary-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 transition-shadow"
                             />
                         </div>
+                        
+                        {/* Sort dropdown */}
+                        <div className="relative" ref={sortMenuRef}>
+                            <button
+                                onClick={(e) => { e.stopPropagation(); setIsSortMenuOpen(!isSortMenuOpen); }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors"
+                                title="Sort files"
+                            >
+                                <ArrowUpDown className="w-4 h-4" />
+                                <span className="hidden sm:inline">
+                                    {sortBy === 'name' ? 'Name' : sortBy === 'size' ? 'Size' : 'Modified'}
+                                </span>
+                                <span className="text-xs text-gray-400">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+                            </button>
+                            {isSortMenuOpen && (
+                                <div className="absolute right-0 mt-1 w-36 bg-white dark:bg-gray-800 rounded-lg shadow-lg py-1 ring-1 ring-black ring-opacity-5 z-50 border border-gray-200 dark:border-gray-700">
+                                    <button
+                                        onClick={() => { handleSort('name'); setIsSortMenuOpen(false); }}
+                                        className={clsx(
+                                            "w-full px-4 py-2 text-left text-sm flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-700",
+                                            sortBy === 'name' ? "text-primary-600 dark:text-primary-400 font-medium" : "text-gray-700 dark:text-gray-300"
+                                        )}
+                                    >
+                                        Name
+                                        {sortBy === 'name' && <span>{sortOrder === 'asc' ? '↑' : '↓'}</span>}
+                                    </button>
+                                    <button
+                                        onClick={() => { handleSort('size'); setIsSortMenuOpen(false); }}
+                                        className={clsx(
+                                            "w-full px-4 py-2 text-left text-sm flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-700",
+                                            sortBy === 'size' ? "text-primary-600 dark:text-primary-400 font-medium" : "text-gray-700 dark:text-gray-300"
+                                        )}
+                                    >
+                                        Size
+                                        {sortBy === 'size' && <span>{sortOrder === 'asc' ? '↑' : '↓'}</span>}
+                                    </button>
+                                    <button
+                                        onClick={() => { handleSort('modified'); setIsSortMenuOpen(false); }}
+                                        className={clsx(
+                                            "w-full px-4 py-2 text-left text-sm flex items-center justify-between hover:bg-gray-100 dark:hover:bg-gray-700",
+                                            sortBy === 'modified' ? "text-primary-600 dark:text-primary-400 font-medium" : "text-gray-700 dark:text-gray-300"
+                                        )}
+                                    >
+                                        Modified
+                                        {sortBy === 'modified' && <span>{sortOrder === 'asc' ? '↑' : '↓'}</span>}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                        
                         <div className="border-l border-gray-300 dark:border-gray-600 h-6 hidden sm:block" />
                         <div className="flex space-x-1 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg">
                             <button
@@ -2767,6 +2894,7 @@ export function FileBrowser() {
                                             onDragStart={(e) => handleGroupDragStart(e, file)}
                                             isLocked={file.is_locked}
                                             lockRequiresRole={file.lock_requires_role}
+                                            isInsideCompanyFolder={isInsideCompanyFolder}
                                         />
                                         {/* Group context menu */}
                                         {activeGroupMenu === file.id && (
@@ -2795,40 +2923,45 @@ export function FileBrowser() {
                                                             <Star className={clsx("w-4 h-4 mr-2", file.is_starred ? "text-yellow-400 fill-yellow-400" : "text-gray-400")} />
                                                             {file.is_starred ? 'Unstar' : 'Star'}
                                                         </button>
-                                                        <button
-                                                            className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                                                            onClick={(e) => { e.stopPropagation(); handleRenameGroup(file); }}
-                                                        >
-                                                            <Edit3 className="w-4 h-4 mr-2 text-gray-400" /> Rename
-                                                        </button>
-                                                        <button
-                                                            className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                                                            onClick={(e) => { e.stopPropagation(); handleMoveGroup(file); }}
-                                                        >
-                                                            <Move className="w-4 h-4 mr-2 text-gray-400" /> Move Group
-                                                        </button>
-                                                        {/* Lock/Unlock Group */}
-                                                        {file.is_locked ? (
-                                                            <button
-                                                                className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                                                                onClick={(e) => { e.stopPropagation(); handleUnlockGroup(file); }}
-                                                            >
-                                                                <Unlock className="w-4 h-4 mr-2 text-gray-400" /> Unlock Group
-                                                            </button>
-                                                        ) : (
-                                                            <button
-                                                                className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
-                                                                onClick={(e) => { e.stopPropagation(); handleLockGroup(file); }}
-                                                            >
-                                                                <Lock className="w-4 h-4 mr-2 text-gray-400" /> Lock Group
-                                                            </button>
+                                                        {/* Edit actions - hidden for non-admins in company folders */}
+                                                        {(!isInsideCompanyFolder || isAdminOrHigher) && (
+                                                            <>
+                                                                <button
+                                                                    className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                                                    onClick={(e) => { e.stopPropagation(); handleRenameGroup(file); }}
+                                                                >
+                                                                    <Edit3 className="w-4 h-4 mr-2 text-gray-400" /> Rename
+                                                                </button>
+                                                                <button
+                                                                    className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                                                    onClick={(e) => { e.stopPropagation(); handleMoveGroup(file); }}
+                                                                >
+                                                                    <Move className="w-4 h-4 mr-2 text-gray-400" /> Move Group
+                                                                </button>
+                                                                {/* Lock/Unlock Group */}
+                                                                {file.is_locked ? (
+                                                                    <button
+                                                                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                                                        onClick={(e) => { e.stopPropagation(); handleUnlockGroup(file); }}
+                                                                    >
+                                                                        <Unlock className="w-4 h-4 mr-2 text-gray-400" /> Unlock Group
+                                                                    </button>
+                                                                ) : (
+                                                                    <button
+                                                                        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center"
+                                                                        onClick={(e) => { e.stopPropagation(); handleLockGroup(file); }}
+                                                                    >
+                                                                        <Lock className="w-4 h-4 mr-2 text-gray-400" /> Lock Group
+                                                                    </button>
+                                                                )}
+                                                                <button
+                                                                    className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center"
+                                                                    onClick={(e) => { e.stopPropagation(); handleDeleteGroup(file); }}
+                                                                >
+                                                                    <Trash2 className="w-4 h-4 mr-2" /> Delete Group
+                                                                </button>
+                                                            </>
                                                         )}
-                                                        <button
-                                                            className="w-full px-4 py-2 text-left text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center"
-                                                            onClick={(e) => { e.stopPropagation(); handleDeleteGroup(file); }}
-                                                        >
-                                                            <Trash2 className="w-4 h-4 mr-2" /> Delete Group
-                                                        </button>
                                                     </>
                                                 )}
                                             </div>
@@ -2886,7 +3019,7 @@ export function FileBrowser() {
                                             if (file.type === 'group') {
                                                 handleGroupClick(file);
                                             } else if (file.type === 'folder') {
-                                                setCurrentPath([...currentPath, file.name]);
+                                                navigateToFolder(file);
                                             } else {
                                                 handlePreview(file);
                                             }
@@ -2900,7 +3033,7 @@ export function FileBrowser() {
                                             <p className="text-xs text-gray-500 dark:text-gray-400">{file.size}</p>
                                             {/* Owner avatar or company icon with styled hover tooltip */}
                                             <div className="relative group/avatar">
-                                                {file.type === 'folder' && file.is_company_folder ? (
+                                                {(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? (
                                                     <div className="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center ring-2 ring-white dark:ring-gray-800 shadow-sm">
                                                         <Building2 className="w-5 h-5 text-gray-600 dark:text-gray-300" />
                                                     </div>
@@ -2914,8 +3047,8 @@ export function FileBrowser() {
                                                 )}
                                                 {/* Styled tooltip */}
                                                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 bg-gray-900 dark:bg-gray-700 text-white text-xs rounded-lg opacity-0 group-hover/avatar:opacity-100 transition-opacity pointer-events-none whitespace-nowrap shadow-lg z-10">
-                                                    <div className="font-medium">{file.type === 'folder' && file.is_company_folder ? 'Company Folder' : (file.owner || 'Unknown')}</div>
-                                                    <div className="text-gray-400 text-[10px]">{file.type === 'folder' && file.is_company_folder ? 'Shared' : 'Owner'}</div>
+                                                    <div className="font-medium">{(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? 'Company' : (file.owner || 'Unknown')}</div>
+                                                    <div className="text-gray-400 text-[10px]">{(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? 'Company Files' : 'Owner'}</div>
                                                     {/* Tooltip arrow */}
                                                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"></div>
                                                 </div>
@@ -2947,6 +3080,8 @@ export function FileBrowser() {
                                                 currentUserRole={user?.role}
                                                 canUseAi={aiStatus.hasAccess}
                                                 aiEnabled={aiStatus.enabled}
+                                                isAdminOrHigher={isAdminOrHigher}
+                                                isInsideCompanyFolder={isInsideCompanyFolder}
                                                 onPreview={handlePreview}
                                                 onShare={handleShare}
                                                 onDownload={handleDownload}
@@ -3081,7 +3216,7 @@ export function FileBrowser() {
                                                 if (file.type === 'group') {
                                                     handleGroupClick(file);
                                                 } else if (file.type === 'folder') {
-                                                    setCurrentPath([...currentPath, file.name]);
+                                                    navigateToFolder(file);
                                                 } else {
                                                     handlePreview(file);
                                                 }
@@ -3107,8 +3242,8 @@ export function FileBrowser() {
                                                 {file.modified}
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 hidden lg:table-cell">
-                                                <div className="flex items-center" title={file.type === 'folder' && file.is_company_folder ? 'Company Folder' : (file.owner || 'Unknown')}>
-                                                    {file.type === 'folder' && file.is_company_folder ? (
+                                                <div className="flex items-center" title={(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? 'Company' : (file.owner || 'Unknown')}>
+                                                    {(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? (
                                                         <div className="h-6 w-6 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center mr-2">
                                                             <Building2 className="w-3 h-3 text-gray-600 dark:text-gray-300" />
                                                         </div>
@@ -3120,7 +3255,7 @@ export function FileBrowser() {
                                                             className="mr-2"
                                                         />
                                                     )}
-                                                    <span>{file.type === 'folder' && file.is_company_folder ? 'Company' : (file.owner || 'Unknown')}</span>
+                                                    <span>{(file.type === 'folder' && file.is_company_folder) || isInsideCompanyFolder ? 'Company' : (file.owner || 'Unknown')}</span>
                                                 </div>
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium relative">
@@ -3149,6 +3284,8 @@ export function FileBrowser() {
                                                         currentUserRole={user?.role}
                                                         canUseAi={aiStatus.hasAccess}
                                                         aiEnabled={aiStatus.enabled}
+                                                        isAdminOrHigher={isAdminOrHigher}
+                                                        isInsideCompanyFolder={isInsideCompanyFolder}
                                                         onPreview={handlePreview}
                                                         onShare={handleShare}
                                                         onDownload={handleDownload}
@@ -3274,6 +3411,8 @@ export function FileBrowser() {
                 canUseAi={aiStatus.hasAccess}
                 companyId={companyId || ''}
                 authFetch={authFetch}
+                isInsideCompanyFolder={isInsideCompanyFolder}
+                isAdminOrHigher={isAdminOrHigher}
             />
         </div>
     );

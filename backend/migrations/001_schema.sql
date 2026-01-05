@@ -1081,4 +1081,241 @@ COMMENT ON TABLE user_malware_counts IS 'Tracks malware upload counts per user f
 COMMENT ON COLUMN virus_scan_jobs.next_retry_at IS 'When this job should be retried (exponential backoff: 30s, 2min, 10min)';
 COMMENT ON COLUMN files_metadata.scan_status IS 'Virus scan status: pending, clean, infected, skipped, error';
 
+-- ============================================================================
+-- AI ADD-ON TABLES
+-- ============================================================================
+
+-- Tenant AI settings - controls per-tenant AI configuration
+CREATE TABLE IF NOT EXISTS tenant_ai_settings (
+    tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    provider VARCHAR(50) NOT NULL DEFAULT 'openai',
+    api_key_encrypted TEXT,  -- encrypted at rest
+    allowed_roles TEXT[] NOT NULL DEFAULT ARRAY['Admin', 'SuperAdmin'],
+    hipaa_approved_only BOOLEAN NOT NULL DEFAULT false,
+    sox_read_only BOOLEAN NOT NULL DEFAULT false,
+    monthly_token_limit INTEGER NOT NULL DEFAULT 100000,
+    daily_request_limit INTEGER NOT NULL DEFAULT 100,
+    tokens_used_this_month INTEGER NOT NULL DEFAULT 0,
+    requests_today INTEGER NOT NULL DEFAULT 0,
+    last_usage_reset DATE DEFAULT CURRENT_DATE,
+    maintenance_mode BOOLEAN NOT NULL DEFAULT false,
+    maintenance_message TEXT DEFAULT 'AI features are temporarily unavailable for maintenance. Please try again later.',
+    custom_endpoint TEXT,  -- Custom API endpoint URL for self-hosted providers
+    custom_model VARCHAR(100),  -- Custom model name for self-hosted providers
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Add columns if they don't exist (for existing installations)
+ALTER TABLE tenant_ai_settings ADD COLUMN IF NOT EXISTS custom_endpoint TEXT;
+ALTER TABLE tenant_ai_settings ADD COLUMN IF NOT EXISTS custom_model VARCHAR(100);
+
+-- AI usage tracking (audit log without content for compliance)
+CREATE TABLE IF NOT EXISTS ai_usage_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    file_id UUID,  -- No FK to allow logging even if file deleted
+    file_name VARCHAR(255),
+    action VARCHAR(50) NOT NULL,  -- summarize, answer, embed, search
+    provider VARCHAR(50) NOT NULL,
+    model VARCHAR(100),
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    status VARCHAR(20) NOT NULL,  -- success, error, rate_limited, forbidden
+    error_message TEXT,  -- Only technical error, never content
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_usage_tenant ON ai_usage_logs(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_tenant_created ON ai_usage_logs(tenant_id, created_at DESC);
+
+-- File embeddings for semantic search
+CREATE TABLE IF NOT EXISTS file_embeddings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    file_id UUID NOT NULL REFERENCES files_metadata(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    chunk_text_hash VARCHAR(64) NOT NULL,  -- SHA256 hash to detect changes
+    embedding BYTEA,  -- Stored as binary, convert to vector for similarity search
+    embedding_dim INTEGER DEFAULT 1536,  -- Dimension hint for reconstruction
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(file_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_file ON file_embeddings(file_id);
+CREATE INDEX IF NOT EXISTS idx_embeddings_tenant ON file_embeddings(tenant_id);
+
+-- File summaries cache
+CREATE TABLE IF NOT EXISTS file_summaries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_id UUID NOT NULL REFERENCES files_metadata(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,  -- SHA256 hash of file content to detect changes
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(file_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_summaries_file ON file_summaries(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_summaries_tenant ON file_summaries(tenant_id);
+
+-- Function to reset daily request counts
+CREATE OR REPLACE FUNCTION reset_daily_ai_requests() RETURNS void AS $$
+BEGIN
+    UPDATE tenant_ai_settings 
+    SET requests_today = 0, 
+        last_usage_reset = CURRENT_DATE 
+    WHERE last_usage_reset < CURRENT_DATE;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to reset monthly token counts (call on 1st of month)
+CREATE OR REPLACE FUNCTION reset_monthly_ai_tokens() RETURNS void AS $$
+BEGIN
+    UPDATE tenant_ai_settings 
+    SET tokens_used_this_month = 0;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================================
+-- DISCORD OAUTH TABLES
+-- ============================================================================
+
+-- Tenant Discord settings (enable/disable feature per tenant)
+CREATE TABLE IF NOT EXISTS tenant_discord_settings (
+    tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- User Discord connections (OAuth tokens - encrypted)
+CREATE TABLE IF NOT EXISTS user_discord_connections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    discord_user_id VARCHAR(50) NOT NULL,
+    discord_username VARCHAR(100),
+    discord_discriminator VARCHAR(10),
+    discord_avatar VARCHAR(255),
+    access_token_encrypted TEXT NOT NULL,
+    refresh_token_encrypted TEXT,
+    token_expires_at TIMESTAMPTZ,
+    -- Notification preferences
+    dm_notifications_enabled BOOLEAN NOT NULL DEFAULT true,
+    notify_file_shared BOOLEAN NOT NULL DEFAULT true,
+    notify_file_uploaded BOOLEAN NOT NULL DEFAULT true,
+    notify_comments BOOLEAN NOT NULL DEFAULT true,
+    notify_file_requests BOOLEAN NOT NULL DEFAULT true,
+    -- Metadata
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id),
+    UNIQUE(discord_user_id, tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_connections_discord_user ON user_discord_connections(discord_user_id);
+CREATE INDEX IF NOT EXISTS idx_discord_connections_tenant ON user_discord_connections(tenant_id);
+
+-- Discord notification log (for debugging and rate limiting)
+CREATE TABLE IF NOT EXISTS discord_notification_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_logs_user ON discord_notification_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_discord_logs_created ON discord_notification_logs(created_at);
+
+-- OAuth state tokens (for CSRF protection during OAuth flow)
+CREATE TABLE IF NOT EXISTS discord_oauth_states (
+    state VARCHAR(64) PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '10 minutes')
+);
+
+CREATE INDEX IF NOT EXISTS idx_discord_oauth_states_expires ON discord_oauth_states(expires_at);
+
+-- ============================================================================
+-- FILE COMMENTS
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS file_comments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_id UUID NOT NULL REFERENCES files_metadata(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    parent_id UUID REFERENCES file_comments(id) ON DELETE CASCADE,
+    is_edited BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_comments_file ON file_comments(file_id);
+CREATE INDEX IF NOT EXISTS idx_file_comments_tenant ON file_comments(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_file_comments_user ON file_comments(user_id);
+CREATE INDEX IF NOT EXISTS idx_file_comments_parent ON file_comments(parent_id);
+CREATE INDEX IF NOT EXISTS idx_file_comments_created ON file_comments(created_at DESC);
+
+-- ============================================================================
+-- FILE GROUPS
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS file_groups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    department_id UUID REFERENCES departments(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    color VARCHAR(7),
+    icon VARCHAR(50) DEFAULT 'folder-kanban',
+    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    parent_path VARCHAR(1024),
+    -- Visibility (matches file visibility model)
+    visibility VARCHAR(20) NOT NULL DEFAULT 'department',
+    owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- Locking
+    is_locked BOOLEAN DEFAULT FALSE,
+    locked_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    locked_at TIMESTAMPTZ,
+    lock_password_hash VARCHAR(255),
+    lock_requires_role VARCHAR(50),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(tenant_id, department_id, name, visibility)
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_groups_tenant_dept ON file_groups(tenant_id, department_id);
+CREATE INDEX IF NOT EXISTS idx_file_groups_created_by ON file_groups(created_by);
+CREATE INDEX IF NOT EXISTS idx_file_groups_parent_path ON file_groups(tenant_id, parent_path);
+CREATE INDEX IF NOT EXISTS idx_file_groups_locked ON file_groups(is_locked) WHERE is_locked = true;
+CREATE INDEX IF NOT EXISTS idx_file_groups_visibility ON file_groups(tenant_id, visibility, owner_id);
+
+-- Add group_id to files_metadata
+ALTER TABLE files_metadata ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES file_groups(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_files_metadata_group_id ON files_metadata(group_id) WHERE group_id IS NOT NULL;
+
+-- Add user-specific sharing to file_shares
+ALTER TABLE file_shares ADD COLUMN IF NOT EXISTS shared_with_user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_file_shares_shared_with ON file_shares(shared_with_user_id);
+CREATE INDEX IF NOT EXISTS idx_file_shares_tenant_user ON file_shares(tenant_id, shared_with_user_id);
+
+COMMENT ON TABLE file_groups IS 'User-created collections to manually group related files together';
+COMMENT ON COLUMN file_groups.department_id IS 'If NULL, group is tenant-wide; otherwise visible to department members';
+COMMENT ON COLUMN file_groups.color IS 'Optional hex color for visual distinction (e.g., #FF5733)';
+COMMENT ON COLUMN file_groups.visibility IS 'department = visible to department/tenant, private = only visible to owner';
+COMMENT ON COLUMN file_groups.owner_id IS 'Owner of the group (for private visibility filtering)';
+COMMENT ON COLUMN file_groups.is_locked IS 'Whether the group is locked (prevents access to files within)';
+COMMENT ON COLUMN file_groups.lock_requires_role IS 'Minimum role required to access locked group (e.g., Admin, Manager)';
 

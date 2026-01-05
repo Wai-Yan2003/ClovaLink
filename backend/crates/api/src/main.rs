@@ -402,6 +402,7 @@ async fn main() {
         .route("/api/admin/migrate-content-hashes", post(handlers::migrate_content_hashes))
         .route("/api/admin/health", get(health::detailed_health))
         .route("/api/admin/version", get(health::get_version_info))
+        .route("/api/admin/storage/sync", post(health::sync_storage))
         
         // API Usage / Performance Monitoring (SuperAdmin only)
         .route("/api/admin/usage/summary", get(api_usage::get_usage_summary))

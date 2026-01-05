@@ -63,6 +63,9 @@ interface FileGroupViewerProps {
     canUseAi?: boolean;
     companyId: string;
     authFetch: (url: string, options?: RequestInit) => Promise<Response>;
+    // Company folder restrictions
+    isInsideCompanyFolder?: boolean;
+    isAdminOrHigher?: boolean;
 }
 
 const ITEMS_PER_PAGE = 5;
@@ -174,7 +177,11 @@ export function FileGroupViewer({
     canUseAi = false,
     companyId,
     authFetch,
+    isInsideCompanyFolder = false,
+    isAdminOrHigher = false,
 }: FileGroupViewerProps) {
+    // Check if user can modify files in company folders
+    const canModifyInCompanyFolder = !isInsideCompanyFolder || isAdminOrHigher;
     const [searchQuery, setSearchQuery] = useState('');
     const [activeMenu, setActiveMenu] = useState<string | null>(null);
     const [currentPage, setCurrentPage] = useState(1);
@@ -487,9 +494,9 @@ export function FileGroupViewer({
                                                             </>
                                                         )}
 
-                                                        {/* Standard Actions */}
+                                                        {/* Standard Actions - hidden for non-admins in company folders */}
                                                         {/* Note: Star is intentionally removed for grouped files - star the group instead */}
-                                                        {onCopy && (
+                                                        {onCopy && canModifyInCompanyFolder && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); onCopy(file); setActiveMenu(null); }}
                                                                 className={menuItemClass}
@@ -498,7 +505,7 @@ export function FileGroupViewer({
                                                                 Copy
                                                             </button>
                                                         )}
-                                                        {onShare && (
+                                                        {onShare && canModifyInCompanyFolder && (
                                                             <button
                                                                 onClick={(e) => { e.stopPropagation(); onShare(file); setActiveMenu(null); }}
                                                                 className={menuItemClass}
@@ -508,15 +515,19 @@ export function FileGroupViewer({
                                                             </button>
                                                         )}
                                                         
-                                                        <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
-                                                        
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); onMoveToFolder(file); setActiveMenu(null); }}
-                                                            className={menuItemClass}
-                                                        >
-                                                            <FolderOutput className="w-4 h-4 mr-2 text-gray-400" />
-                                                            Move to Folder
-                                                        </button>
+                                                        {canModifyInCompanyFolder && (
+                                                            <>
+                                                                <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
+                                                                
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); onMoveToFolder(file); setActiveMenu(null); }}
+                                                                    className={menuItemClass}
+                                                                >
+                                                                    <FolderOutput className="w-4 h-4 mr-2 text-gray-400" />
+                                                                    Move to Folder
+                                                                </button>
+                                                            </>
+                                                        )}
                                                         
                                                         {onProperties && (
                                                             <button
@@ -528,15 +539,19 @@ export function FileGroupViewer({
                                                             </button>
                                                         )}
                                                         
-                                                        <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
-                                                        
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); onRemoveFromGroup(file); setActiveMenu(null); }}
-                                                            className={clsx(menuItemClass, "text-red-600 dark:text-red-400")}
-                                                        >
-                                                            <Trash2 className="w-4 h-4 mr-2" />
-                                                            Remove from Group
-                                                        </button>
+                                                        {canModifyInCompanyFolder && (
+                                                            <>
+                                                                <div className="border-t border-gray-100 dark:border-gray-700 my-1" />
+                                                                
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); onRemoveFromGroup(file); setActiveMenu(null); }}
+                                                                    className={clsx(menuItemClass, "text-red-600 dark:text-red-400")}
+                                                                >
+                                                                    <Trash2 className="w-4 h-4 mr-2" />
+                                                                    Remove from Group
+                                                                </button>
+                                                            </>
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>

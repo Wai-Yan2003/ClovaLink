@@ -110,6 +110,14 @@ impl AiService {
         }
         if input.maintenance_message.is_some() {
             updates.push(format!("maintenance_message = ${}", param_idx));
+            param_idx += 1;
+        }
+        if input.custom_endpoint.is_some() {
+            updates.push(format!("custom_endpoint = ${}", param_idx));
+            param_idx += 1;
+        }
+        if input.custom_model.is_some() {
+            updates.push(format!("custom_model = ${}", param_idx));
             let _ = param_idx; // Suppress unused warning
         }
         
@@ -156,6 +164,12 @@ impl AiService {
             db_query = db_query.bind(v);
         }
         if let Some(v) = input.maintenance_message {
+            db_query = db_query.bind(v);
+        }
+        if let Some(v) = input.custom_endpoint {
+            db_query = db_query.bind(v);
+        }
+        if let Some(v) = input.custom_model {
             db_query = db_query.bind(v);
         }
         

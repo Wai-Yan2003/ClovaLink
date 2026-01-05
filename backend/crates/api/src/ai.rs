@@ -485,10 +485,45 @@ pub async fn get_providers() -> Json<ProvidersResponse> {
             ProviderInfo {
                 id: "openai".to_string(),
                 name: "OpenAI".to_string(),
-                hipaa_approved: true,
+                hipaa_approved: false,
                 models: vec!["gpt-4o-mini".to_string(), "gpt-4o".to_string()],
             },
-            // Add more providers here as they're implemented
+            ProviderInfo {
+                id: "anthropic".to_string(),
+                name: "Anthropic".to_string(),
+                hipaa_approved: false,
+                models: vec!["claude-3-haiku".to_string(), "claude-3-sonnet".to_string(), "claude-3-opus".to_string()],
+            },
+            ProviderInfo {
+                id: "google".to_string(),
+                name: "Google".to_string(),
+                hipaa_approved: false,
+                models: vec!["gemini-1.5-flash".to_string(), "gemini-1.5-pro".to_string()],
+            },
+            ProviderInfo {
+                id: "azure".to_string(),
+                name: "Azure OpenAI".to_string(),
+                hipaa_approved: false,
+                models: vec!["gpt-4o-mini".to_string(), "gpt-4o".to_string()],
+            },
+            ProviderInfo {
+                id: "mistral".to_string(),
+                name: "Mistral AI".to_string(),
+                hipaa_approved: false,
+                models: vec!["mistral-small".to_string(), "mistral-large".to_string()],
+            },
+            ProviderInfo {
+                id: "cohere".to_string(),
+                name: "Cohere".to_string(),
+                hipaa_approved: false,
+                models: vec!["command-r".to_string(), "command-r-plus".to_string()],
+            },
+            ProviderInfo {
+                id: "custom".to_string(),
+                name: "Self-Hosted / Custom".to_string(),
+                hipaa_approved: false,
+                models: vec!["custom".to_string()],
+            },
         ],
     })
 }

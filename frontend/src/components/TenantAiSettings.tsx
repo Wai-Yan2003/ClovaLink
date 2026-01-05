@@ -38,6 +38,8 @@ interface AiSettings {
   requests_today: number;
   maintenance_mode: boolean;
   maintenance_message: string | null;
+  custom_endpoint: string | null;
+  custom_model: string | null;
 }
 
 interface UsageStats {
@@ -82,6 +84,7 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
 
   // Form state
   const [enabled, setEnabled] = useState(false);
+  const [showEnableWarning, setShowEnableWarning] = useState(false);
   const [provider, setProvider] = useState('openai');
   const [apiKey, setApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -92,6 +95,8 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
   const [dailyRequestLimit, setDailyRequestLimit] = useState(100);
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState('');
+  const [customEndpoint, setCustomEndpoint] = useState('');
+  const [customModel, setCustomModel] = useState('');
   
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -116,7 +121,9 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
       monthlyTokenLimit !== settings.monthly_token_limit ||
       dailyRequestLimit !== settings.daily_request_limit ||
       maintenanceMode !== settings.maintenance_mode ||
-      maintenanceMessage !== (settings.maintenance_message || ''));
+      maintenanceMessage !== (settings.maintenance_message || '') ||
+      customEndpoint !== (settings.custom_endpoint || '') ||
+      customModel !== (settings.custom_model || ''));
 
   // Fetch all data
   const fetchData = async () => {
@@ -141,6 +148,8 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
         setDailyRequestLimit(s.daily_request_limit);
         setMaintenanceMode(s.maintenance_mode);
         setMaintenanceMessage(s.maintenance_message || '');
+        setCustomEndpoint(s.custom_endpoint || '');
+        setCustomModel(s.custom_model || '');
       }
 
       if (providersRes.ok) {
@@ -193,6 +202,8 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
         daily_request_limit: dailyRequestLimit,
         maintenance_mode: maintenanceMode,
         maintenance_message: maintenanceMessage || null,
+        custom_endpoint: customEndpoint || null,
+        custom_model: customModel || null,
       };
 
       // Only include API key if it was changed
@@ -422,7 +433,14 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
                 </p>
               </div>
               <button
-                onClick={() => setEnabled(!enabled)}
+                onClick={() => {
+                  if (!enabled) {
+                    // Show warning before enabling
+                    setShowEnableWarning(true);
+                  } else {
+                    setEnabled(false);
+                  }
+                }}
                 className={clsx(
                   'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
                   enabled ? 'bg-primary-600' : 'bg-gray-300 dark:bg-gray-600'
@@ -449,7 +467,7 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
               >
                 {providers.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} {p.hipaa_approved && '(HIPAA Approved)'}
+                    {p.name}
                   </option>
                 ))}
               </select>
@@ -516,6 +534,48 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
               </p>
             </div>
 
+            {/* Self-Hosted Configuration */}
+            {provider === 'custom' && (
+              <div className="p-4 bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 rounded-lg space-y-4">
+                <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                  <Wrench className="w-4 h-4" />
+                  <span className="text-sm font-medium">Self-Hosted Configuration</span>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Custom Endpoint URL
+                  </label>
+                  <input
+                    type="url"
+                    value={customEndpoint}
+                    onChange={(e) => setCustomEndpoint(e.target.value)}
+                    placeholder="http://localhost:11434/v1"
+                    className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    e.g., http://localhost:11434/v1 for Ollama, or your custom LLM server endpoint
+                  </p>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Model Name
+                  </label>
+                  <input
+                    type="text"
+                    value={customModel}
+                    onChange={(e) => setCustomModel(e.target.value)}
+                    placeholder="llama3"
+                    className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    The model name to use on your server (e.g., llama3, mistral, codellama)
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Role Access */}
             <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
               <div className="flex items-center gap-2 mb-4">
@@ -575,48 +635,6 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
                     className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500"
                   />
                 </div>
-              </div>
-            </div>
-
-            {/* Compliance */}
-            <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
-              <div className="flex items-center gap-2 mb-4">
-                <Shield className="w-4 h-4 text-gray-500" />
-                <h4 className="font-medium text-gray-900 dark:text-white">Compliance</h4>
-              </div>
-              <div className="space-y-4">
-                <label className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={hipaaApprovedOnly}
-                    onChange={(e) => setHipaaApprovedOnly(e.target.checked)}
-                    className="w-4 h-4 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
-                  />
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                      HIPAA Mode
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      Only allow HIPAA-approved AI providers
-                    </p>
-                  </div>
-                </label>
-                <label className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={soxReadOnly}
-                    onChange={(e) => setSoxReadOnly(e.target.checked)}
-                    className="w-4 h-4 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
-                  />
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                      SOX Read-Only Mode
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      Disable AI content generation (summarize, Q&A), allow only search
-                    </p>
-                  </div>
-                </label>
               </div>
             </div>
 
@@ -826,6 +844,44 @@ export function TenantAiSettings({ tenantId, authFetch }: TenantAiSettingsProps)
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* AI Enable Warning Modal */}
+      {showEnableWarning && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-amber-100 dark:bg-amber-900/30 rounded-full">
+                  <AlertTriangle className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  AI Provider Agreement Required
+                </h3>
+              </div>
+              <p className="text-gray-600 dark:text-gray-300 mb-6">
+                Before enabling AI features, ensure you have a proper data processing agreement with your AI provider to protect sensitive documents. Your organization is responsible for compliance with applicable data protection regulations.
+              </p>
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={() => setShowEnableWarning(false)}
+                  className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setEnabled(true);
+                    setShowEnableWarning(false);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 transition-colors"
+                >
+                  I Understand, Enable
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

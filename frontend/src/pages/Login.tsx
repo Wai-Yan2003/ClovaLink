@@ -211,7 +211,7 @@ export function Login() {
 
                 {/* Footer */}
                 <p className="mt-6 text-center text-xs text-gray-500">
-                    © 2025 ClovaLink. All rights reserved.
+                    © {new Date().getFullYear()} ClovaLink. All rights reserved.
                 </p>
             </div>
         </div>

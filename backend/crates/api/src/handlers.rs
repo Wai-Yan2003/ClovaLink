@@ -261,6 +261,102 @@ async fn generate_unique_filename(
     Ok(fallback)
 }
 
+/// Check if a file/folder is inside a company folder (by checking parent path hierarchy)
+/// Returns true if any ancestor folder is marked as a company folder
+async fn is_inside_company_folder(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    parent_path: Option<&str>,
+) -> bool {
+    let Some(path) = parent_path else {
+        return false;
+    };
+    
+    if path.is_empty() {
+        return false;
+    }
+    
+    // Build all ancestor paths to check
+    // e.g., for "a/b/c", check "a/b/c", "a/b", "a"
+    let mut paths_to_check: Vec<String> = Vec::new();
+    let mut current = path.to_string();
+    
+    while !current.is_empty() {
+        paths_to_check.push(current.clone());
+        if let Some(idx) = current.rfind('/') {
+            current = current[..idx].to_string();
+        } else {
+            // This is the top-level folder name
+            break;
+        }
+    }
+    
+    if paths_to_check.is_empty() {
+        return false;
+    }
+    
+    // Check if any folder in the path hierarchy is a company folder
+    // We need to check each folder by its name and parent_path
+    for folder_path in &paths_to_check {
+        let folder_name = folder_path.rsplit('/').next().unwrap_or(folder_path);
+        let folder_parent: Option<&str> = if folder_path.contains('/') {
+            folder_path.rsplit_once('/').map(|(p, _)| p)
+        } else {
+            None
+        };
+        
+        let result: Option<(bool,)> = sqlx::query_as(
+            "SELECT COALESCE(is_company_folder, false) FROM files_metadata 
+             WHERE tenant_id = $1 AND name = $2 AND parent_path IS NOT DISTINCT FROM $3 
+             AND is_deleted = false AND is_directory = true"
+        )
+        .bind(tenant_id)
+        .bind(folder_name)
+        .bind(folder_parent)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        
+        if result.map(|r| r.0).unwrap_or(false) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Check if a specific file/folder is a company folder or is inside one
+async fn is_file_in_company_folder(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    file_id: Uuid,
+) -> bool {
+    // First check if the file itself is a company folder
+    let file_info: Option<(bool, Option<String>, bool)> = sqlx::query_as(
+        "SELECT is_directory, parent_path, COALESCE(is_company_folder, false) 
+         FROM files_metadata WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"
+    )
+    .bind(file_id)
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    
+    let Some((is_dir, parent_path, is_company_folder)) = file_info else {
+        return false;
+    };
+    
+    // If this is a company folder itself, return true
+    if is_dir && is_company_folder {
+        return true;
+    }
+    
+    // Check if parent path is inside a company folder
+    is_inside_company_folder(pool, tenant_id, parent_path.as_deref()).await
+}
+
 #[derive(serde::Deserialize)]
 pub struct UploadParams {
     parent_path: Option<String>,
@@ -284,6 +380,24 @@ pub async fn upload_file(
             auth.user_id, auth.tenant_id, tenant_id
         );
         return Err(StatusCode::FORBIDDEN);
+    }
+    
+    // Check if uploading to a company folder - only admins can upload
+    let is_admin = auth.role == "SuperAdmin" || auth.role == "Admin";
+    if !is_admin && !parent_path.is_empty() {
+        let in_company_folder = is_inside_company_folder(
+            &state.pool, 
+            tenant_id, 
+            Some(&parent_path)
+        ).await;
+        
+        if in_company_folder {
+            tracing::warn!(
+                "User {} attempted to upload to company folder (parent_path: {})",
+                auth.user_id, parent_path
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
     
     // Get compliance mode for SOX versioning check
@@ -1202,6 +1316,19 @@ pub async fn create_folder(
         return Err(StatusCode::FORBIDDEN);
     }
     
+    // Check if creating folder inside a company folder - only admins can do this
+    let is_admin = auth.role == "SuperAdmin" || auth.role == "Admin";
+    if !is_admin && !parent_path.is_empty() {
+        let in_company_folder = is_inside_company_folder(&state.pool, tenant_id, Some(parent_path)).await;
+        if in_company_folder {
+            tracing::warn!(
+                "User {} attempted to create folder in company folder (parent_path: {})",
+                auth.user_id, parent_path
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    
     // Construct storage key (path)
     let key = if parent_path.is_empty() {
         format!("{}/{}", company_id, folder_name)
@@ -1220,10 +1347,37 @@ pub async fn create_folder(
         
     let department_id = user.and_then(|u| u.department_id);
 
+    // Check if parent folder is a company folder (to inherit status)
+    let parent_is_company_folder = if !parent_path.is_empty() {
+        // Parse the parent path to find the parent folder
+        let parent_name = parent_path.rsplit('/').next().unwrap_or(parent_path);
+        let parent_parent_path: Option<&str> = if parent_path.contains('/') {
+            parent_path.rsplit_once('/').map(|(p, _)| p)
+        } else {
+            None
+        };
+        
+        let result: Option<(bool,)> = sqlx::query_as(
+            "SELECT COALESCE(is_company_folder, false) FROM files_metadata 
+             WHERE tenant_id = $1 AND name = $2 AND parent_path IS NOT DISTINCT FROM $3 AND is_deleted = false AND is_directory = true"
+        )
+        .bind(tenant_id)
+        .bind(parent_name)
+        .bind(parent_parent_path)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
+        
+        result.map(|r| r.0).unwrap_or(false)
+    } else {
+        false
+    };
+
     sqlx::query(
         r#"
-        INSERT INTO files_metadata (tenant_id, name, storage_path, size_bytes, content_type, is_directory, owner_id, department_id, parent_path, visibility)
-        VALUES ($1, $2, $3, 0, 'directory', true, $4, $5, $6, $7)
+        INSERT INTO files_metadata (tenant_id, name, storage_path, size_bytes, content_type, is_directory, owner_id, department_id, parent_path, visibility, is_company_folder)
+        VALUES ($1, $2, $3, 0, 'directory', true, $4, $5, $6, $7, $8)
         "#
     )
     .bind(tenant_id)
@@ -1233,6 +1387,7 @@ pub async fn create_folder(
     .bind(department_id)
     .bind(if parent_path.is_empty() { None::<&str> } else { Some(parent_path) })
     .bind(visibility)
+    .bind(parent_is_company_folder)
     .execute(&state.pool)
     .await
     .map_err(|e| {
@@ -1880,6 +2035,19 @@ pub async fn rename_file(
     let (file_id, current_name, current_parent_path, is_immutable, is_locked, is_directory) = 
         file_info.ok_or(StatusCode::NOT_FOUND)?;
 
+    // Check if file is inside a company folder - only admins can rename
+    let is_admin = auth.role == "SuperAdmin" || auth.role == "Admin";
+    if !is_admin {
+        let in_company_folder = is_file_in_company_folder(&state.pool, tenant_id, file_id).await;
+        if in_company_folder {
+            tracing::warn!(
+                "User {} attempted to rename file {} in company folder",
+                auth.user_id, file_id
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
     // SECURITY: Check if user has permission to rename this file
     if !can_access_file(&state.pool, file_id, tenant_id, auth.user_id, &auth.role, "write").await? {
         tracing::warn!(
@@ -2113,6 +2281,18 @@ pub async fn delete_file(
     // Check if user is allowed to delete
     let is_admin = auth.role == "SuperAdmin" || auth.role == "Admin";
     let is_owner = owner_id == Some(auth.user_id);
+
+    // Check if file is inside a company folder - only admins can delete
+    if !is_admin {
+        let in_company_folder = is_file_in_company_folder(&state.pool, tenant_id, file_id).await;
+        if in_company_folder {
+            tracing::warn!(
+                "User {} attempted to delete file {} in company folder",
+                auth.user_id, file_id
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     if !is_admin && !is_owner {
         // Check can_access_file for more granular permissions
@@ -3111,6 +3291,19 @@ pub async fn move_file(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // Check if file is inside a company folder - only admins can move
+    let is_admin = auth.role == "SuperAdmin" || auth.role == "Admin";
+    if !is_admin {
+        let in_company_folder = is_file_in_company_folder(&state.pool, tenant_id, file_uuid).await;
+        if in_company_folder {
+            tracing::warn!(
+                "User {} attempted to move file {} in company folder",
+                auth.user_id, file_uuid
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
     // Get current file info (content-addressed storage: we don't need storage_path for moves)
     let file: Option<(String, Option<String>, bool, bool, Option<Uuid>, String)> = sqlx::query_as(
         r#"
@@ -3212,6 +3405,41 @@ pub async fn move_file(
     } else {
         None // Root folder
     };
+
+    // Check if target location is inside a company folder - only admins can move there
+    if !is_admin {
+        if let Some(ref target_path) = new_parent_path {
+            let target_in_company_folder = is_inside_company_folder(&state.pool, tenant_id, Some(target_path)).await;
+            if target_in_company_folder {
+                tracing::warn!(
+                    "User {} attempted to move file {} into company folder",
+                    auth.user_id, file_uuid
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        
+        // Also check if the target folder itself is a company folder
+        if let Some(target_id) = target_parent_id {
+            let target_is_company: Option<(bool,)> = sqlx::query_as(
+                "SELECT COALESCE(is_company_folder, false) FROM files_metadata WHERE id = $1 AND tenant_id = $2"
+            )
+            .bind(target_id)
+            .bind(tenant_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+            
+            if target_is_company.map(|r| r.0).unwrap_or(false) {
+                tracing::warn!(
+                    "User {} attempted to move file {} into company folder",
+                    auth.user_id, file_uuid
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
 
     // Check for duplicate filename in target location
     let duplicate_check: Option<(Uuid,)> = sqlx::query_as(
@@ -3999,6 +4227,14 @@ pub async fn create_file_share(
     // Check if user has permission to access this file
     if !can_access_file(&state.pool, file_uuid, tenant_id, auth.user_id, &auth.role, "share").await? {
         return Err(StatusCode::FORBIDDEN);
+    }
+    
+    // Check if file is inside a company folder - only admins can share
+    if auth.role != "SuperAdmin" && auth.role != "Admin" {
+        if is_file_in_company_folder(&state.pool, tenant_id, file_uuid).await {
+            tracing::warn!("Security: Non-admin user {} attempted to share file from company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
     
     // Verify file/folder exists

@@ -22,6 +22,8 @@ pub struct TenantAiSettings {
     pub last_usage_reset: Option<chrono::NaiveDate>,
     pub maintenance_mode: bool,
     pub maintenance_message: Option<String>,
+    pub custom_endpoint: Option<String>,
+    pub custom_model: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -42,6 +44,8 @@ pub struct TenantAiSettingsResponse {
     pub requests_today: i32,
     pub maintenance_mode: bool,
     pub maintenance_message: Option<String>,
+    pub custom_endpoint: Option<String>,
+    pub custom_model: Option<String>,
 }
 
 impl From<TenantAiSettings> for TenantAiSettingsResponse {
@@ -68,6 +72,8 @@ impl From<TenantAiSettings> for TenantAiSettingsResponse {
             requests_today: settings.requests_today,
             maintenance_mode: settings.maintenance_mode,
             maintenance_message: settings.maintenance_message,
+            custom_endpoint: settings.custom_endpoint,
+            custom_model: settings.custom_model,
         }
     }
 }
@@ -87,6 +93,8 @@ pub struct UpdateAiSettingsInput {
     pub daily_request_limit: Option<i32>,
     pub maintenance_mode: Option<bool>,
     pub maintenance_message: Option<String>,
+    pub custom_endpoint: Option<String>,
+    pub custom_model: Option<String>,
 }
 
 /// AI usage log entry

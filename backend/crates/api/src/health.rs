@@ -562,3 +562,142 @@ pub async fn get_current_version() -> Json<Value> {
     }))
 }
 
+// =============================================================================
+// Storage Sync - Clean up orphaned file records
+// =============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct StorageSyncResult {
+    pub scanned: u64,
+    pub orphaned: u64,
+    pub cleaned: u64,
+    pub errors: Vec<String>,
+    pub duration_ms: u64,
+}
+
+/// Sync storage with database - finds and cleans up orphaned file records
+/// Files in the database that don't exist in storage are soft-deleted
+/// POST /api/admin/storage/sync
+pub async fn sync_storage(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+) -> Result<Json<StorageSyncResult>, StatusCode> {
+    // Only SuperAdmin or Admin can sync storage
+    if auth.role != "SuperAdmin" && auth.role != "Admin" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let start = Instant::now();
+    let mut scanned: u64 = 0;
+    let mut orphaned: u64 = 0;
+    let mut cleaned: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    // Get all non-deleted, non-directory files from the database
+    let files: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, name, storage_path 
+        FROM files_metadata 
+        WHERE is_deleted = false 
+          AND is_directory = false 
+          AND storage_path IS NOT NULL 
+          AND storage_path != ''
+        ORDER BY created_at DESC
+        "#
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query files for sync: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        file_count = files.len(),
+        "Starting storage sync"
+    );
+
+    for (file_id, file_name, storage_path) in files {
+        scanned += 1;
+
+        // Check if file exists in storage
+        match state.storage.exists(&storage_path).await {
+            Ok(true) => {
+                // File exists in storage, nothing to do
+            }
+            Ok(false) => {
+                // File doesn't exist in storage - mark as deleted (orphaned)
+                orphaned += 1;
+                
+                match sqlx::query(
+                    r#"
+                    UPDATE files_metadata 
+                    SET is_deleted = true, deleted_at = NOW(), updated_at = NOW()
+                    WHERE id = $1
+                    "#
+                )
+                .bind(file_id)
+                .execute(&state.pool)
+                .await
+                {
+                    Ok(_) => {
+                        cleaned += 1;
+                        tracing::info!(
+                            file_id = %file_id,
+                            file_name = %file_name,
+                            storage_path = %storage_path,
+                            "Marked orphaned file as deleted"
+                        );
+                    }
+                    Err(e) => {
+                        errors.push(format!("Failed to delete {}: {}", file_name, e));
+                    }
+                }
+            }
+            Err(e) => {
+                errors.push(format!("Failed to check {}: {}", file_name, e));
+            }
+        }
+    }
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    // Audit log
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO audit_logs (tenant_id, user_id, action, resource_type, resource_id, metadata, ip_address)
+        VALUES ($1, $2, 'storage_sync', 'system', NULL, $3, $4::inet)
+        "#
+    )
+    .bind(auth.tenant_id)
+    .bind(auth.user_id)
+    .bind(json!({
+        "scanned": scanned,
+        "orphaned": orphaned,
+        "cleaned": cleaned,
+        "errors_count": errors.len(),
+        "duration_ms": duration_ms
+    }))
+    .bind(&auth.ip_address)
+    .execute(&state.pool)
+    .await;
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        scanned = scanned,
+        orphaned = orphaned,
+        cleaned = cleaned,
+        duration_ms = duration_ms,
+        "Storage sync completed"
+    );
+
+    Ok(Json(StorageSyncResult {
+        scanned,
+        orphaned,
+        cleaned,
+        errors,
+        duration_ms,
+    }))
+}
+

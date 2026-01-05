@@ -1,6 +1,6 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { LayoutDashboard, Users, FileText, Settings, Building2, Search, ChevronDown, LogOut, Puzzle, Folder, User, Menu, X, Link2, Shield, Activity, HelpCircle, Share2 } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, Settings, Building2, Search, ChevronDown, LogOut, Puzzle, Folder, User, Menu, X, Link2, Shield, Activity, HelpCircle, Share2, Layers } from 'lucide-react';
 import { NotificationBell } from './NotificationBell';
 import clsx from 'clsx';
 import { useAuth, useAuthFetch } from '../context/AuthContext';
@@ -21,7 +21,7 @@ interface SearchResult {
   id: string;
   name: string;
   description?: string;
-  result_type: 'company' | 'user' | 'file';
+  result_type: 'company' | 'user' | 'file' | 'folder' | 'group';
   link: string;
 }
 
@@ -29,6 +29,7 @@ interface SearchResults {
   companies: SearchResult[];
   users: SearchResult[];
   files: SearchResult[];
+  groups: SearchResult[];
   total: number;
 }
 
@@ -41,10 +42,11 @@ interface NavItem {
     icon: typeof LayoutDashboard;
     permission: string | null;
     superAdminOnly?: boolean;
+    adminOnly?: boolean; // Only visible to SuperAdmin and Admin
 }
 
 const NAVIGATION: NavItem[] = [
-    { name: 'Dashboard', href: '/', icon: LayoutDashboard, permission: null }, // Always visible
+    { name: 'Dashboard', href: '/', icon: LayoutDashboard, permission: null, adminOnly: true }, // Admin/SuperAdmin only
     { name: 'Companies', href: '/companies', icon: Building2, permission: 'tenants.manage' },
     { name: 'Users', href: '/users', icon: Users, permission: 'users.view' },
     { name: 'Files', href: '/files', icon: FileText, permission: 'files.view' },
@@ -387,7 +389,11 @@ export function Layout() {
                             if (item.superAdminOnly) {
                                 return user?.role === 'SuperAdmin';
                             }
-                            // No permission required (like Dashboard)
+                            // Admin-only items (SuperAdmin or Admin)
+                            if (item.adminOnly) {
+                                return user?.role === 'SuperAdmin' || user?.role === 'Admin';
+                            }
+                            // No permission required
                             if (!item.permission) {
                                 return true;
                             }
@@ -576,7 +582,31 @@ export function Layout() {
                                                             onClick={() => handleResultClick(result)}
                                                             className="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-left"
                                                         >
-                                                            <Folder className="w-4 h-4 text-gray-400" />
+                                                            {result.result_type === 'folder' ? (
+                                                                <Folder className="w-4 h-4 text-blue-500" />
+                                                            ) : (
+                                                                <FileText className="w-4 h-4 text-gray-400" />
+                                                            )}
+                                                            <div className="min-w-0 flex-1">
+                                                                <p className="text-sm font-medium text-gray-900 dark:text-white truncate">{result.name}</p>
+                                                                {result.description && (
+                                                                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{result.description}</p>
+                                                                )}
+                                                            </div>
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {searchResults.groups && searchResults.groups.length > 0 && (
+                                                <div>
+                                                    <p className="px-4 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Groups</p>
+                                                    {searchResults.groups.map((result) => (
+                                                        <button
+                                                            key={result.id}
+                                                            onClick={() => handleResultClick(result)}
+                                                            className="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-left"
+                                                        >
+                                                            <Layers className="w-4 h-4 text-purple-500" />
                                                             <div className="min-w-0 flex-1">
                                                                 <p className="text-sm font-medium text-gray-900 dark:text-white truncate">{result.name}</p>
                                                                 {result.description && (

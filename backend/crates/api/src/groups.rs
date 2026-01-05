@@ -20,6 +20,41 @@ use crate::AppState;
 const MAX_FILES_PER_GROUP: i64 = 20;
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Check if a group is inside a company folder
+async fn is_group_in_company_folder(
+    pool: &sqlx::PgPool,
+    tenant_id: Uuid,
+    group_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result: Option<(bool,)> = sqlx::query_as(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM file_groups g
+            JOIN files_metadata fm ON fm.tenant_id = g.tenant_id
+                AND fm.is_directory = true
+                AND fm.is_deleted = false
+                AND COALESCE(fm.is_company_folder, false) = true
+                AND (
+                    g.parent_path = fm.name
+                    OR g.parent_path LIKE fm.name || '/%'
+                    OR (fm.parent_path IS NOT NULL AND g.parent_path LIKE fm.parent_path || '/' || fm.name || '%')
+                )
+            WHERE g.id = $1 AND g.tenant_id = $2
+        )
+        "#
+    )
+    .bind(group_id)
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await?;
+    
+    Ok(result.map(|r| r.0).unwrap_or(false))
+}
+
+// ============================================================================
 // Data Structures
 // ============================================================================
 
@@ -36,6 +71,9 @@ pub struct FileGroup {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub parent_path: Option<String>, // Folder path where this group lives (null = root)
+    // Visibility (matches file model)
+    pub visibility: String,  // 'department' or 'private'
+    pub owner_id: Option<Uuid>,
     // Locking fields
     pub is_locked: Option<bool>,
     pub locked_by: Option<Uuid>,
@@ -59,6 +97,7 @@ pub struct CreateGroupInput {
     pub color: Option<String>,
     pub icon: Option<String>,
     pub department_id: Option<String>,
+    pub visibility: Option<String>, // 'department' (default) or 'private'
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +112,7 @@ pub struct UpdateGroupInput {
 pub struct ListGroupsParams {
     pub department_id: Option<String>,
     pub parent_path: Option<String>, // Filter by folder path (empty string = root)
+    pub visibility: Option<String>,  // 'department' or 'private' filter
 }
 
 /// Row structure for list_groups query (to work around SQLx tuple size limit)
@@ -89,6 +129,8 @@ struct ListGroupsRow {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     parent_path: Option<String>,
+    visibility: String,
+    owner_id: Option<Uuid>,
     is_locked: Option<bool>,
     locked_by: Option<Uuid>,
     locked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -122,7 +164,7 @@ pub async fn list_groups(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Parse department filter
+    // Parse department filter from query params (for admin filtering)
     let dept_filter: Option<Uuid> = params.department_id
         .as_ref()
         .and_then(|s| if s.is_empty() { None } else { Uuid::parse_str(s).ok() });
@@ -130,13 +172,34 @@ pub async fn list_groups(
     // Parse parent_path filter (empty string means root, None means all)
     let path_filter = params.parent_path.as_deref();
 
+    // Parse visibility filter
+    let visibility_filter = params.visibility.as_deref();
+
+    // Get user's department and allowed departments for non-admin filtering
+    let user_dept_info: Option<(Option<Uuid>, Option<Vec<Uuid>>)> = sqlx::query_as(
+        "SELECT department_id, allowed_department_ids FROM users WHERE id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or(None);
+
+    let user_department_id = user_dept_info.as_ref().and_then(|u| u.0);
+    let user_allowed_depts: Vec<Uuid> = user_dept_info
+        .as_ref()
+        .and_then(|u| u.1.clone())
+        .unwrap_or_default();
+
     // Query groups with file counts, total size, owner names, and locking info
     // Filter by parent_path to only show groups in the current folder
+    // Filter by visibility: department groups visible to all, private only to owner (or admins)
+    // For non-admins: only show groups in their department(s), NOT groups with NULL department
     let groups: Vec<ListGroupsRow> = sqlx::query_as(
         r#"
         SELECT 
             g.id, g.tenant_id, g.department_id, g.name, g.description, g.color, g.icon,
             g.created_by, g.created_at, g.updated_at, g.parent_path,
+            g.visibility, g.owner_id,
             g.is_locked, g.locked_by, g.locked_at, g.lock_requires_role,
             COALESCE(COUNT(f.id), 0)::bigint as file_count,
             COALESCE(SUM(f.size_bytes), 0)::bigint as total_size,
@@ -145,11 +208,50 @@ pub async fn list_groups(
         LEFT JOIN files_metadata f ON f.group_id = g.id AND f.is_deleted = false
         LEFT JOIN users u ON u.id = g.created_by
         WHERE g.tenant_id = $1
-        AND ($2::uuid IS NULL OR g.department_id IS NULL OR g.department_id = $2)
         AND (
             $3::text IS NULL 
             OR ($3 = '' AND (g.parent_path IS NULL OR g.parent_path = ''))
             OR g.parent_path = $3
+        )
+        AND (
+            -- Visibility filter from query param
+            $4::text IS NULL OR g.visibility = $4
+        )
+        AND (
+            -- Department access control
+            CASE 
+                WHEN $6 IN ('SuperAdmin', 'Admin') THEN
+                    -- Admins can see all or filter by department param
+                    ($2::uuid IS NULL OR g.department_id IS NULL OR g.department_id = $2)
+                ELSE
+                    -- Non-admins: see groups in their department(s) OR groups inside company folders
+                    (
+                        (
+                            g.department_id IS NOT NULL 
+                            AND (g.department_id = $7 OR g.department_id = ANY($8))
+                        )
+                        OR
+                        -- Also show groups inside company folders (any parent folder is a company folder)
+                        EXISTS (
+                            SELECT 1 FROM files_metadata fm 
+                            WHERE fm.tenant_id = g.tenant_id 
+                            AND fm.is_directory = true 
+                            AND fm.is_deleted = false 
+                            AND COALESCE(fm.is_company_folder, false) = true
+                            AND (
+                                g.parent_path = fm.name 
+                                OR g.parent_path LIKE fm.name || '/%'
+                                OR (fm.parent_path IS NOT NULL AND g.parent_path LIKE fm.parent_path || '/' || fm.name || '%')
+                            )
+                        )
+                    )
+            END
+        )
+        AND (
+            -- Visibility access control: department groups visible to dept members, private only to owner/admins
+            g.visibility = 'department'
+            OR (g.visibility = 'private' AND g.owner_id = $5)
+            OR $6 IN ('SuperAdmin', 'Admin')
         )
         GROUP BY g.id, u.name
         ORDER BY g.name ASC
@@ -158,6 +260,11 @@ pub async fn list_groups(
     .bind(tenant_id)
     .bind(dept_filter)
     .bind(path_filter)
+    .bind(visibility_filter)
+    .bind(auth.user_id)
+    .bind(&auth.role)
+    .bind(user_department_id)
+    .bind(&user_allowed_depts)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| {
@@ -179,6 +286,8 @@ pub async fn list_groups(
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 parent_path: row.parent_path,
+                visibility: row.visibility,
+                owner_id: row.owner_id,
                 is_locked: row.is_locked,
                 locked_by: row.locked_by,
                 locked_at: row.locked_at,
@@ -219,6 +328,10 @@ pub async fn create_group(
         .as_ref()
         .and_then(|s| if s.is_empty() { None } else { Uuid::parse_str(s).ok() });
 
+    // Parse and validate visibility (default to 'department')
+    let visibility = input.visibility.as_deref().unwrap_or("department");
+    let visibility = if visibility == "private" { "private" } else { "department" };
+
     // Validate color format if provided
     if let Some(ref color) = input.color {
         if !color.starts_with('#') || color.len() != 7 {
@@ -226,12 +339,12 @@ pub async fn create_group(
         }
     }
 
-    // Create the group
+    // Create the group with visibility and owner_id
     let group: FileGroup = sqlx::query_as(
         r#"
-        INSERT INTO file_groups (tenant_id, department_id, name, description, color, icon, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, is_locked, locked_by, locked_at, lock_requires_role
+        INSERT INTO file_groups (tenant_id, department_id, name, description, color, icon, created_by, visibility, owner_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, visibility, owner_id, is_locked, locked_by, locked_at, lock_requires_role
         "#
     )
     .bind(tenant_id)
@@ -241,6 +354,8 @@ pub async fn create_group(
     .bind(&input.color)
     .bind(input.icon.as_deref().unwrap_or("folder-kanban"))
     .bind(auth.user_id)
+    .bind(visibility)
+    .bind(auth.user_id) // owner_id = creating user
     .fetch_one(&state.pool)
     .await
     .map_err(|e| {
@@ -263,7 +378,7 @@ pub async fn create_group(
     .bind(tenant_id)
     .bind(auth.user_id)
     .bind(group.id)
-    .bind(json!({ "name": name }))
+    .bind(json!({ "name": name, "visibility": visibility }))
     .bind(&auth.ip_address)
     .execute(&state.pool)
     .await;
@@ -287,6 +402,14 @@ pub async fn update_group(
     // Verify tenant access
     if auth.role != "SuperAdmin" && auth.tenant_id != tenant_id {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check if group is inside company folder - only admins can modify
+    if is_group_in_company_folder(&state.pool, tenant_id, group_uuid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if auth.role != "SuperAdmin" && auth.role != "Admin" {
+            tracing::warn!("Security: Non-admin user {} attempted to rename group in company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // Check group exists and belongs to tenant
@@ -320,7 +443,7 @@ pub async fn update_group(
             icon = COALESCE($6, icon),
             updated_at = NOW()
         WHERE id = $1 AND tenant_id = $2
-        RETURNING id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, is_locked, locked_by, locked_at, lock_requires_role
+        RETURNING id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, visibility, owner_id, is_locked, locked_by, locked_at, lock_requires_role
         "#
     )
     .bind(group_uuid)
@@ -358,6 +481,14 @@ pub async fn delete_group(
     // Verify tenant access
     if auth.role != "SuperAdmin" && auth.tenant_id != tenant_id {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check if group is inside company folder - only admins can delete
+    if is_group_in_company_folder(&state.pool, tenant_id, group_uuid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if auth.role != "SuperAdmin" && auth.role != "Admin" {
+            tracing::warn!("Security: Non-admin user {} attempted to delete group in company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // Get group info for audit log
@@ -513,6 +644,69 @@ pub async fn remove_file_from_group(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // Get file info including parent_path, name, visibility to check for duplicates
+    let file_info: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT name, parent_path, visibility FROM files_metadata 
+         WHERE id = $1 AND tenant_id = $2 AND is_deleted = false AND group_id IS NOT NULL"
+    )
+    .bind(file_uuid)
+    .bind(tenant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to fetch file info: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let Some((file_name, parent_path, visibility)) = file_info else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    // Check for duplicate filename at the target location (files NOT in a group)
+    let duplicate: Option<(Uuid,)> = sqlx::query_as(
+        r#"SELECT id FROM files_metadata 
+         WHERE tenant_id = $1 AND name = $2 AND parent_path IS NOT DISTINCT FROM $3 
+         AND visibility = $4 AND is_deleted = false AND group_id IS NULL AND id != $5"#
+    )
+    .bind(tenant_id)
+    .bind(&file_name)
+    .bind(&parent_path)
+    .bind(&visibility)
+    .bind(file_uuid)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check for duplicate: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if duplicate.is_some() {
+        // Generate suggested name: "file (1).ext"
+        let name_without_ext = std::path::Path::new(&file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&file_name);
+        let extension = std::path::Path::new(&file_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|e| format!(".{}", e))
+            .unwrap_or_default();
+        let suggested_name = format!("{} (1){}", name_without_ext, extension);
+
+        tracing::warn!(
+            file_id = %file_uuid,
+            file_name = %file_name,
+            "Cannot remove file from group - duplicate name exists at target location"
+        );
+
+        return Ok(Json(json!({
+            "error": format!("A file named \"{}\" already exists in this location. Rename the file first or remove the conflicting file.", file_name),
+            "duplicate": true,
+            "conflicting_name": file_name,
+            "suggested_name": suggested_name
+        })));
+    }
+
     // Remove file from group
     let result = sqlx::query(
         "UPDATE files_metadata SET group_id = NULL WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"
@@ -560,7 +754,7 @@ pub async fn get_group_files(
 
     // Get group info
     let group: Option<FileGroup> = sqlx::query_as(
-        "SELECT id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, is_locked, locked_by, locked_at, lock_requires_role FROM file_groups WHERE id = $1 AND tenant_id = $2"
+        "SELECT id, tenant_id, department_id, name, description, color, icon, created_by, created_at, updated_at, parent_path, visibility, owner_id, is_locked, locked_by, locked_at, lock_requires_role FROM file_groups WHERE id = $1 AND tenant_id = $2"
     )
     .bind(group_uuid)
     .bind(tenant_id)
@@ -571,6 +765,15 @@ pub async fn get_group_files(
     let Some(group) = group else {
         return Err(StatusCode::NOT_FOUND);
     };
+
+    // Check visibility access: private groups only visible to owner or admins
+    if group.visibility == "private" 
+        && group.owner_id != Some(auth.user_id) 
+        && auth.role != "SuperAdmin" 
+        && auth.role != "Admin" 
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     // Check if user can access locked group
     if group.is_locked.unwrap_or(false) {
@@ -639,6 +842,7 @@ pub async fn get_group_files(
 pub struct MoveGroupInput {
     pub target_folder_id: Option<String>,
     pub target_path: Option<String>,
+    pub target_visibility: Option<String>,  // 'department' or 'private'
 }
 
 /// Move a group to a folder (updates the group's parent_path, not the files)
@@ -657,9 +861,17 @@ pub async fn move_group_to_folder(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Get group info
-    let group: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, parent_path FROM file_groups WHERE id = $1 AND tenant_id = $2"
+    // Check if group is inside company folder - only admins can move
+    if is_group_in_company_folder(&state.pool, tenant_id, group_uuid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if auth.role != "SuperAdmin" && auth.role != "Admin" {
+            tracing::warn!("Security: Non-admin user {} attempted to move group in company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    // Get group info including current visibility
+    let group: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT name, parent_path, visibility FROM file_groups WHERE id = $1 AND tenant_id = $2"
     )
     .bind(group_uuid)
     .bind(tenant_id)
@@ -667,9 +879,25 @@ pub async fn move_group_to_folder(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let Some((group_name, old_path)) = group else {
+    let Some((group_name, old_path, current_visibility)) = group else {
         return Err(StatusCode::NOT_FOUND);
     };
+
+    // Check if trying to change visibility - groups are locked to their original visibility
+    if let Some(ref target_vis) = input.target_visibility {
+        if target_vis != &current_visibility {
+            tracing::warn!(
+                group_id = %group_uuid,
+                current = %current_visibility,
+                target = %target_vis,
+                "Attempted to move group across visibility boundary"
+            );
+            return Ok(Json(json!({
+                "error": "Groups cannot be moved between department and private files. They are locked to their original visibility.",
+                "visibility_locked": true
+            })));
+        }
+    }
 
     // Determine target path
     let target_path = if let Some(folder_id) = &input.target_folder_id {
@@ -701,7 +929,7 @@ pub async fn move_group_to_folder(
         String::new()
     };
 
-    // Update the GROUP's parent_path (not the files)
+    // Update the GROUP's parent_path only (visibility is locked)
     sqlx::query(
         r#"
         UPDATE file_groups 
@@ -784,6 +1012,14 @@ pub async fn lock_group(
     // Verify tenant access
     if auth.role != "SuperAdmin" && auth.tenant_id != tenant_id {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check if group is inside company folder - only admins can lock
+    if is_group_in_company_folder(&state.pool, tenant_id, group_uuid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if auth.role != "SuperAdmin" && auth.role != "Admin" {
+            tracing::warn!("Security: Non-admin user {} attempted to lock group in company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // Check if user has lock permission (Manager, Admin, SuperAdmin)
@@ -910,6 +1146,14 @@ pub async fn unlock_group(
     // Verify tenant access
     if auth.role != "SuperAdmin" && auth.tenant_id != tenant_id {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Check if group is inside company folder - only admins can unlock
+    if is_group_in_company_folder(&state.pool, tenant_id, group_uuid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if auth.role != "SuperAdmin" && auth.role != "Admin" {
+            tracing::warn!("Security: Non-admin user {} attempted to unlock group in company folder", auth.user_id);
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // Get current group status including lock details

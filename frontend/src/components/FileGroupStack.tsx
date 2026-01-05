@@ -1,5 +1,5 @@
 import React from 'react';
-import { Layers, MoreVertical, Lock } from 'lucide-react';
+import { Layers, MoreVertical, Lock, Building2 } from 'lucide-react';
 import clsx from 'clsx';
 
 // Generate initials from owner name (e.g., "Manager User" -> "MU")
@@ -61,6 +61,8 @@ interface FileGroupStackProps {
     // Locking
     isLocked?: boolean;
     lockRequiresRole?: string;
+    // Company folder
+    isInsideCompanyFolder?: boolean;
 }
 
 export function FileGroupStack({
@@ -79,6 +81,7 @@ export function FileGroupStack({
     className,
     isLocked,
     lockRequiresRole,
+    isInsideCompanyFolder = false,
 }: FileGroupStackProps) {
     // Calculate how many "cards" to show in stack (max 3)
     const stackCards = Math.min(Math.max(fileCount, 1), 3);
@@ -191,19 +194,28 @@ export function FileGroupStack({
                         <p className="text-xs text-gray-500 dark:text-gray-400">
                             {formatFileSize(totalSize)}
                         </p>
-                        {/* Owner avatar with tooltip */}
-                        {owner && (
+                        {/* Owner avatar with tooltip - show company icon when inside company folder */}
+                        {(owner || isInsideCompanyFolder) && (
                             <div className="relative group/avatar">
-                                <div 
-                                    className="h-10 w-10 rounded-full flex items-center justify-center text-white text-xs font-bold bg-primary-600 ring-2 ring-white dark:ring-gray-800 shadow-sm hover:ring-primary-300 dark:hover:ring-primary-600 transition-all cursor-default"
-                                    title={owner}
-                                >
-                                    {getInitials(owner)}
-                                </div>
+                                {isInsideCompanyFolder ? (
+                                    <div 
+                                        className="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center ring-2 ring-white dark:ring-gray-800 shadow-sm"
+                                        title="Company"
+                                    >
+                                        <Building2 className="w-5 h-5 text-gray-600 dark:text-gray-300" />
+                                    </div>
+                                ) : (
+                                    <div 
+                                        className="h-10 w-10 rounded-full flex items-center justify-center text-white text-xs font-bold bg-primary-600 ring-2 ring-white dark:ring-gray-800 shadow-sm hover:ring-primary-300 dark:hover:ring-primary-600 transition-all cursor-default"
+                                        title={owner}
+                                    >
+                                        {getInitials(owner)}
+                                    </div>
+                                )}
                                 {/* Styled tooltip - high z-index to escape card bounds */}
                                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-1.5 bg-gray-900 dark:bg-gray-700 text-white text-xs rounded-lg opacity-0 group-hover/avatar:opacity-100 transition-opacity pointer-events-none whitespace-nowrap shadow-lg z-[100]">
-                                    <div className="font-medium">{owner}</div>
-                                    <div className="text-gray-400 text-[10px]">Owner</div>
+                                    <div className="font-medium">{isInsideCompanyFolder ? 'Company' : owner}</div>
+                                    <div className="text-gray-400 text-[10px]">{isInsideCompanyFolder ? 'Company Files' : 'Owner'}</div>
                                     {/* Tooltip arrow */}
                                     <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900 dark:border-t-gray-700"></div>
                                 </div>

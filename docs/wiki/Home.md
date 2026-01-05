@@ -15,6 +15,15 @@ ClovaLink provides secure file storage, sharing, and compliance features for org
 - **Folder Structure** - Hierarchical organization with department isolation
 - **Deduplication** - Content-addressed storage reduces redundant data
 - **S3 Replication** - Async backup/mirror to secondary bucket for DR
+- **File Groups** - Organize files into virtual collections without moving them
+- **Company Folders** - Shared folders visible to all departments
+
+### AI Features
+- **Document Summarization** - AI-generated summaries for PDFs, Word, and text files
+- **Question & Answer** - Ask questions about document content
+- **Multiple Providers** - OpenAI, Anthropic, Google, Azure, Mistral, Cohere
+- **Self-Hosted Support** - Use Ollama, vLLM, or any OpenAI-compatible server
+- **Usage Limits** - Configurable token and request limits per tenant
 
 ### Multi-Tenancy
 - **Isolated Data** - Complete data separation between organizations
@@ -99,6 +108,8 @@ Password: password123
 | [Security](Security) | Security features and configuration |
 | [Virus Scanning](Virus-Scanning) | ClamAV integration and malware protection |
 | [Discord Integration](Discord-Integration) | Discord DM notifications setup |
+| [AI Features](AI-Features) | AI-powered summarization, Q&A, and search |
+| [File Groups](File-Groups) | Organize files into virtual collections |
 
 ## Tech Stack
 

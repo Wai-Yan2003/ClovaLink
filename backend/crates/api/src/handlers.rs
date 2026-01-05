@@ -1971,6 +1971,170 @@ pub async fn download_file(
         .into_response())
 }
 
+/// Preview Office documents (Excel, PowerPoint) as JSON
+/// Returns structured data for client-side rendering
+#[derive(Debug, serde::Serialize)]
+pub struct OfficePreviewResponse {
+    pub file_type: String,
+    pub sheets: Option<Vec<SheetData>>,  // For Excel
+    pub pptx_info: Option<PptxInfo>,     // For PowerPoint
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SheetData {
+    pub name: String,
+    pub rows: Vec<Vec<String>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PptxInfo {
+    pub slide_count: usize,
+    pub title: Option<String>,
+    pub author: Option<String>,
+}
+
+pub async fn preview_office_file(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Path((company_id, file_id)): Path<(String, String)>,
+) -> Result<Json<OfficePreviewResponse>, StatusCode> {
+    use calamine::{Reader, Xlsx, Xls};
+    use std::io::Cursor;
+    
+    // Parse UUIDs
+    let tenant_id = Uuid::parse_str(&company_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let file_uuid = Uuid::parse_str(&file_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // SECURITY: Check if user has permission to access this file
+    if !can_access_file(&state.pool, file_uuid, tenant_id, auth.user_id, &auth.role, "read").await? {
+        tracing::warn!(
+            "Access denied: user {} attempted to preview file {} without permission",
+            auth.user_id, file_uuid
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Get file metadata
+    let file_info: Option<(String, String)> = sqlx::query_as(
+        "SELECT name, storage_path FROM files_metadata WHERE id = $1 AND tenant_id = $2 AND is_deleted = false"
+    )
+    .bind(file_uuid)
+    .bind(tenant_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (file_name, storage_path) = file_info.ok_or(StatusCode::NOT_FOUND)?;
+    let file_name_lower = file_name.to_lowercase();
+
+    // Download file content
+    let file_bytes = state.storage.download(&storage_path).await
+        .map_err(|e| {
+            tracing::error!("Failed to download file for preview: {}", e);
+            StatusCode::NOT_FOUND
+        })?;
+
+    // Process based on file type
+    if file_name_lower.ends_with(".xlsx") {
+        let cursor = Cursor::new(&file_bytes);
+        let mut workbook: Xlsx<_> = Xlsx::new(cursor)
+            .map_err(|e| {
+                tracing::error!("Failed to parse XLSX: {}", e);
+                StatusCode::UNPROCESSABLE_ENTITY
+            })?;
+
+        let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+        let mut sheets = Vec::new();
+
+        for sheet_name in sheet_names {
+            if let Ok(range) = workbook.worksheet_range(&sheet_name) {
+                let rows: Vec<Vec<String>> = range.rows()
+                    .take(1000) // Limit rows for performance
+                    .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+                    .collect();
+                
+                sheets.push(SheetData { name: sheet_name, rows });
+            }
+        }
+
+        Ok(Json(OfficePreviewResponse {
+            file_type: "xlsx".to_string(),
+            sheets: Some(sheets),
+            pptx_info: None,
+        }))
+    } else if file_name_lower.ends_with(".xls") {
+        let cursor = Cursor::new(&file_bytes);
+        let mut workbook: Xls<_> = Xls::new(cursor)
+            .map_err(|e| {
+                tracing::error!("Failed to parse XLS: {}", e);
+                StatusCode::UNPROCESSABLE_ENTITY
+            })?;
+
+        let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
+        let mut sheets = Vec::new();
+
+        for sheet_name in sheet_names {
+            if let Ok(range) = workbook.worksheet_range(&sheet_name) {
+                let rows: Vec<Vec<String>> = range.rows()
+                    .take(1000)
+                    .map(|row| row.iter().map(|cell| cell.to_string()).collect())
+                    .collect();
+                
+                sheets.push(SheetData { name: sheet_name, rows });
+            }
+        }
+
+        Ok(Json(OfficePreviewResponse {
+            file_type: "xls".to_string(),
+            sheets: Some(sheets),
+            pptx_info: None,
+        }))
+    } else if file_name_lower.ends_with(".pptx") {
+        // Parse PPTX (ZIP file) for metadata
+        let cursor = Cursor::new(&file_bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| {
+                tracing::error!("Failed to open PPTX as ZIP: {}", e);
+                StatusCode::UNPROCESSABLE_ENTITY
+            })?;
+
+        // Count slides
+        let slide_count = archive.file_names()
+            .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+            .count();
+
+        // Try to extract metadata from core.xml
+        let mut title: Option<String> = None;
+        let mut author: Option<String> = None;
+
+        if let Ok(mut core_file) = archive.by_name("docProps/core.xml") {
+            let mut content = String::new();
+            use std::io::Read;
+            if core_file.read_to_string(&mut content).is_ok() {
+                // Simple regex-free parsing
+                if let Some(start) = content.find("<dc:title>") {
+                    if let Some(end) = content[start..].find("</dc:title>") {
+                        title = Some(content[start + 10..start + end].to_string());
+                    }
+                }
+                if let Some(start) = content.find("<dc:creator>") {
+                    if let Some(end) = content[start..].find("</dc:creator>") {
+                        author = Some(content[start + 12..start + end].to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(Json(OfficePreviewResponse {
+            file_type: "pptx".to_string(),
+            sheets: None,
+            pptx_info: Some(PptxInfo { slide_count, title, author }),
+        }))
+    } else {
+        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    }
+}
+
 pub async fn rename_file(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthUser>,

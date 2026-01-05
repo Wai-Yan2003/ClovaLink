@@ -83,6 +83,8 @@ Most small businesses need 80% of enterprise features at 10% of the cost. **Clov
 - Soft delete with recovery
 - Bulk operations
 - Content-addressed storage (deduplication)
+- **File Groups** (virtual collections)
+- **Company Folders** (org-wide sharing)
 
 </td>
 <td width="33%" valign="top">
@@ -127,6 +129,18 @@ Most small businesses need 80% of enterprise features at 10% of the cost. **Clov
 - Sandboxed with permission grants
 
 </td>
+<td width="33%" valign="top">
+
+#### AI Features
+- Document summarization
+- Question & Answer on docs
+- Multi-provider support
+- Self-hosted LLM support
+- Usage limits & monitoring
+
+</td>
+</tr>
+<tr>
 <td width="33%" valign="top">
 
 #### Storage Backends
@@ -459,6 +473,8 @@ All require `Authorization: Bearer <token>` header.
 | `/api/settings` | Compliance, branding, SMTP, blocked extensions |
 | `/api/security/alerts` | List, resolve, dismiss alerts |
 | `/api/audit-logs` | Query with filters, export |
+| `/api/groups` | File groups CRUD, add/remove files |
+| `/api/ai` | Summarization, Q&A, usage stats |
 
 > See [backend/README.md](backend/README.md) for complete API documentation.
 
@@ -488,10 +504,13 @@ Security is a core focus of ClovaLink. Key measures include:
 - [x] Extension system
 - [x] Security alerts dashboard
 - [x] Email notifications for alerts
+- [x] AI-powered document features (summarization, Q&A)
+- [x] File Groups (virtual collections)
+- [x] Company Folders (org-wide sharing)
+- [x] Office document preview (Excel, PowerPoint)
 - [ ] Mobile apps (iOS/Android)
 - [ ] WebDAV support
 - [ ] Real-time collaboration
-- [ ] AI-powered file tagging
 - [ ] Slack/Teams integration
 
 ---

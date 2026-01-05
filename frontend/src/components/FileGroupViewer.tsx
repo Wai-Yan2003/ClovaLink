@@ -118,10 +118,14 @@ const isPreviewable = (contentType?: string, name?: string) => {
                contentType.startsWith('video/') || 
                contentType.startsWith('audio/') ||
                contentType.includes('pdf') ||
-               contentType.startsWith('text/');
+               contentType.startsWith('text/') ||
+               contentType.includes('spreadsheet') ||
+               contentType.includes('excel') ||
+               contentType.includes('presentation') ||
+               contentType.includes('powerpoint');
     }
     const ext = name?.split('.').pop()?.toLowerCase();
-    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'pdf', 'mp4', 'webm', 'mp3', 'wav', 'txt', 'md'].includes(ext || '');
+    return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'pdf', 'mp4', 'webm', 'mp3', 'wav', 'txt', 'md', 'csv', 'xlsx', 'xls', 'pptx', 'ppt'].includes(ext || '');
 };
 
 // Check if file can use AI features (text-based documents only)

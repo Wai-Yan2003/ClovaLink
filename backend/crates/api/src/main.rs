@@ -614,6 +614,7 @@ async fn main() {
         .route("/api/files/{company_id}", get(handlers::list_files))
         .route("/api/files/{company_id}/export", get(handlers::export_files))
         .route("/api/download/{company_id}/{file_id}", get(handlers::download_file))
+        .route("/api/preview/{company_id}/{file_id}", get(handlers::preview_office_file))
         .route("/api/folders/{company_id}", post(handlers::create_folder))
         .route("/api/files/{company_id}/rename", post(handlers::rename_file))
         .route("/api/files/{company_id}/delete", post(handlers::delete_file))

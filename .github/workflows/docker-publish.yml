@@ -11,18 +11,18 @@ env:
   FRONTEND_IMAGE: clovalink-frontend
 
 jobs:
-  build-backend:
-    runs-on: ubuntu-latest
+  # Build backend for amd64 (native x64 runner)
+  build-backend-amd64:
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -40,45 +40,32 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-      
-      - name: Build and push backend
+      - name: Build and push backend (amd64)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ./backend
           file: ./infra/Dockerfile.backend
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            DATABASE_URL=postgres://build:build@localhost/build
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:amd64
+          cache-from: type=gha,scope=backend-amd64
+          cache-to: type=gha,mode=max,scope=backend-amd64
 
-  build-frontend:
-    runs-on: ubuntu-latest
+  # Build backend for arm64 (native ARM runner)
+  build-backend-arm64:
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -96,27 +83,178 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Build and push backend (arm64)
+        id: build
+        uses: docker/build-push-action@v6
         with:
-          images: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}
+          context: ./backend
+          file: ./infra/Dockerfile.backend
+          platforms: linux/arm64
+          push: true
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+            ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:arm64
+          cache-from: type=gha,scope=backend-arm64
+          cache-to: type=gha,mode=max,scope=backend-arm64
+
+  # Create multi-arch manifest for backend
+  backend-manifest:
+    runs-on: ubuntu-24.04
+    needs: [build-backend-amd64, build-backend-arm64]
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Build and push frontend
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Create and push GHCR manifest
+        run: |
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:latest \
+            ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:amd64 \
+            ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:arm64
+          
+          # Also tag with branch/tag name
+          if [[ "${{ github.ref_name }}" != "main" ]]; then
+            docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:${{ github.ref_name }} \
+              ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:amd64 \
+              ghcr.io/${{ github.repository_owner }}/${{ env.BACKEND_IMAGE }}:arm64
+          fi
+      
+      - name: Create and push Docker Hub manifest
+        run: |
+          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:arm64
+
+  # Build frontend for amd64 (native x64 runner)
+  build-frontend-amd64:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Build and push frontend (amd64)
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
           file: ./infra/Dockerfile.frontend
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:amd64
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:amd64
+          cache-from: type=gha,scope=frontend-amd64
+          cache-to: type=gha,mode=max,scope=frontend-amd64
+
+  # Build frontend for arm64 (native ARM runner)
+  build-frontend-arm64:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Build and push frontend (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./infra/Dockerfile.frontend
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:arm64
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:arm64
+          cache-from: type=gha,scope=frontend-arm64
+          cache-to: type=gha,mode=max,scope=frontend-arm64
+
+  # Create multi-arch manifest for frontend
+  frontend-manifest:
+    runs-on: ubuntu-24.04
+    needs: [build-frontend-amd64, build-frontend-arm64]
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Create and push GHCR manifest
+        run: |
+          docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:latest \
+            ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:amd64 \
+            ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:arm64
+          
+          # Also tag with branch/tag name
+          if [[ "${{ github.ref_name }}" != "main" ]]; then
+            docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:${{ github.ref_name }} \
+              ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:amd64 \
+              ghcr.io/${{ github.repository_owner }}/${{ env.FRONTEND_IMAGE }}:arm64
+          fi
+      
+      - name: Create and push Docker Hub manifest
+        run: |
+          docker buildx imagetools create -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:arm64

@@ -47,7 +47,7 @@ export function PublicUpload() {
             const formData = new FormData();
             formData.append('file', file);
 
-            const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+            const API_URL = import.meta.env.VITE_API_URL || '';
             const response = await fetch(`${API_URL}/api/public-upload/${token}`, {
                 method: 'POST',
                 body: formData,

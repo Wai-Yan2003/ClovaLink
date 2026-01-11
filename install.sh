@@ -159,6 +159,7 @@ echo -e "  ${CYAN}Are you installing on a VPS/remote server? (y/N):${NC}"
 read_input "  VPS: " IS_VPS "n"
 
 HOST_ADDRESS="localhost"
+PUBLIC_URL=""
 SETUP_NGINX="n"
 
 if [[ "$IS_VPS" =~ ^[Yy]$ ]]; then
@@ -167,21 +168,43 @@ if [[ "$IS_VPS" =~ ^[Yy]$ ]]; then
 
     if [ -n "$DETECTED_IP" ]; then
         echo -e "  ${GREEN}✓${NC} Detected public IP: ${DETECTED_IP}"
-        echo -e "  ${CYAN}Enter your domain or IP (default: ${DETECTED_IP}):${NC}"
-        read_input "  Host: " HOST_ADDRESS "$DETECTED_IP"
+    fi
+
+    # Ask for public URL (for share links)
+    echo ""
+    echo -e "  ${BOLD}Public URL Configuration${NC}"
+    echo -e "  This URL will be used for share links, email notifications, etc."
+    echo -e "  Examples: ${CYAN}files.yourcompany.com${NC} or ${CYAN}${DETECTED_IP:-your-server-ip}${NC}"
+    echo ""
+    echo -e "  ${CYAN}Enter your domain or public IP:${NC}"
+    if [ -n "$DETECTED_IP" ]; then
+        read_input "  URL: " PUBLIC_URL "$DETECTED_IP"
     else
-        echo -e "  ${CYAN}Enter your domain or server IP:${NC}"
-        read_input "  Host: " HOST_ADDRESS ""
-        if [ -z "$HOST_ADDRESS" ]; then
-            echo -e "  ${RED}✗${NC} Host address is required for VPS installation"
+        read_input "  URL: " PUBLIC_URL ""
+        if [ -z "$PUBLIC_URL" ]; then
+            echo -e "  ${RED}✗${NC} Public URL is required for VPS installation"
             exit 1
         fi
+    fi
+    HOST_ADDRESS="$PUBLIC_URL"
+
+    # Ask about HTTPS
+    echo ""
+    echo -e "  ${CYAN}Will you be using HTTPS? (recommended for production) (y/N):${NC}"
+    read_input "  HTTPS: " USE_HTTPS "n"
+
+    if [[ "$USE_HTTPS" =~ ^[Yy]$ ]]; then
+        PROTOCOL="https"
+    else
+        PROTOCOL="http"
     fi
 
     # Ask about nginx setup
     echo ""
     echo -e "  ${CYAN}Would you like to set up nginx as a reverse proxy? (Y/n):${NC}"
     read_input "  Setup nginx: " SETUP_NGINX "y"
+else
+    PROTOCOL="http"
 fi
 
 # Create .env file
@@ -212,6 +235,15 @@ fi
     echo "# Environment"
     echo "ENVIRONMENT=production"
     echo "RUST_LOG=info"
+    echo ""
+    echo "# Base URL for share links and notifications"
+    if [[ "$SETUP_NGINX" =~ ^[Yy]$ ]]; then
+        echo "BASE_URL=${PROTOCOL}://${HOST_ADDRESS}"
+    elif [ "$HOST_ADDRESS" != "localhost" ]; then
+        echo "BASE_URL=${PROTOCOL}://${HOST_ADDRESS}:${WEB_PORT}"
+    else
+        echo "BASE_URL=http://localhost:${WEB_PORT}"
+    fi
 } > .env
 
 echo -e "  ${GREEN}✓${NC} Created .env configuration"
@@ -338,15 +370,20 @@ if $COMPOSE_CMD ps | grep -q "Up\|running"; then
 
     # Display appropriate URLs based on setup type
     if [[ "$SETUP_NGINX" =~ ^[Yy]$ ]]; then
-        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}http://${HOST_ADDRESS}${NC}"
-        echo -e "  ${BOLD}API Endpoint:${NC}   ${CYAN}http://${HOST_ADDRESS}/api${NC}"
+        DISPLAY_URL="${PROTOCOL}://${HOST_ADDRESS}"
+        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}${DISPLAY_URL}${NC}"
+        echo -e "  ${BOLD}API Endpoint:${NC}   ${CYAN}${DISPLAY_URL}/api${NC}"
     elif [ "$HOST_ADDRESS" != "localhost" ]; then
-        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}http://${HOST_ADDRESS}:${WEB_PORT}${NC}"
-        echo -e "  ${BOLD}API Endpoint:${NC}   ${CYAN}http://${HOST_ADDRESS}:${API_PORT}${NC}"
+        DISPLAY_URL="${PROTOCOL}://${HOST_ADDRESS}:${WEB_PORT}"
+        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}${DISPLAY_URL}${NC}"
+        echo -e "  ${BOLD}API Endpoint:${NC}   ${CYAN}${PROTOCOL}://${HOST_ADDRESS}:${API_PORT}${NC}"
     else
-        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}http://localhost:${WEB_PORT}${NC}"
+        DISPLAY_URL="http://localhost:${WEB_PORT}"
+        echo -e "  ${BOLD}Web Interface:${NC}  ${CYAN}${DISPLAY_URL}${NC}"
         echo -e "  ${BOLD}API Endpoint:${NC}   ${CYAN}http://localhost:${API_PORT}${NC}"
     fi
+    echo ""
+    echo -e "  ${BOLD}Share Links:${NC}    ${CYAN}${DISPLAY_URL}/share/...${NC}"
     echo ""
     echo -e "  ${BOLD}Default Login:${NC}"
     echo -e "    Email:    ${CYAN}superadmin@clovalink.com${NC}"

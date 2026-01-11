@@ -34,7 +34,7 @@ export function PublicDownload() {
 
     const fetchShareInfo = async () => {
         try {
-            const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+            const API_URL = import.meta.env.VITE_API_URL || '';
             const response = await fetch(`${API_URL}/api/share/${token}/info`);
             
             if (response.ok) {
@@ -68,7 +68,7 @@ export function PublicDownload() {
         setDownloading(true);
         
         try {
-            const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+            const API_URL = import.meta.env.VITE_API_URL || '';
             const headers: Record<string, string> = {};
             
             // Add auth header if logged in (for private shares)

